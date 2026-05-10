@@ -28,10 +28,18 @@ Install Claude Code as part of the deploy:
 INSTALL_CLAUDE=1 bash ./bootstrap.sh
 ```
 
-Install Node.js and npm as part of the deploy:
+Node.js and npm are installed by default when system package installation is enabled.
+Skip them with:
 
 ```sh
-INSTALL_NODE=1 bash ./bootstrap.sh
+INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
+```
+
+System packages are installed when running as root or when sudo is enabled. To force
+skipping sudo-managed packages:
+
+```sh
+DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 ```
 
 ## What it installs
@@ -40,8 +48,8 @@ INSTALL_NODE=1 bash ./bootstrap.sh
 - Oh My Zsh plus `zsh-autosuggestions` and `zsh-syntax-highlighting`
 - zoxide, TPM, rustup, uv
 - cargo tools: `eza`, `bat`, `lolcrab`
-- latest amd64 `.deb` release of fastfetch
-- optional Node.js and npm with `INSTALL_NODE=1`
+- latest fastfetch release into `~/.local/bin`
+- Node.js and npm by default when system package installation is enabled
 
 ## Chezmoi files
 

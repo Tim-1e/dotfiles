@@ -2,19 +2,72 @@
 set -euo pipefail
 
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
-export RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}"
-export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export PATH="$CARGO_HOME/bin:$HOME/.local/bin:$PATH"
 
 SUDO=""
-if [ "$(id -u)" -ne 0 ]; then
-  if command -v sudo >/dev/null 2>&1; then
-    SUDO="sudo"
-  else
-    echo "This installer needs root or sudo for apt packages." >&2
-    exit 1
+HAS_SYSTEM_INSTALL=0
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles"
+STATE_FILE="$STATE_DIR/install.env"
+
+setup_system_install() {
+  if [ "$(id -u)" -eq 0 ]; then
+    HAS_SYSTEM_INSTALL=1
+    return
   fi
-fi
+
+  case "${DOTFILES_USE_SUDO:-auto}" in
+    0|false|no|NO|False)
+      echo "Skipping system packages because DOTFILES_USE_SUDO=0."
+      return
+      ;;
+    1|true|yes|YES|True)
+      if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+        HAS_SYSTEM_INSTALL=1
+      else
+        echo "sudo not found; skipping system packages."
+      fi
+      return
+      ;;
+  esac
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "sudo not found; skipping system packages."
+    return
+  fi
+
+  if sudo -n true >/dev/null 2>&1; then
+    SUDO="sudo"
+    HAS_SYSTEM_INSTALL=1
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf "Use sudo to install system packages? [Y/n] "
+    read -r answer
+    case "$answer" in
+      n|N|no|NO)
+        echo "Skipping system packages."
+        ;;
+      *)
+        SUDO="sudo"
+        HAS_SYSTEM_INSTALL=1
+        ;;
+    esac
+  else
+    echo "sudo requires interaction; skipping system packages."
+  fi
+}
+
+write_state() {
+  mkdir -p "$STATE_DIR"
+  {
+    echo "SYSTEM_INSTALL=$HAS_SYSTEM_INSTALL"
+    echo "INSTALL_NODE=${INSTALL_NODE:-1}"
+  } > "$STATE_FILE"
+}
 
 apt_install() {
   $SUDO apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update
@@ -26,6 +79,11 @@ apt_install() {
 }
 
 install_base_packages() {
+  if [ "$HAS_SYSTEM_INSTALL" != "1" ]; then
+    echo "Skipping apt packages; root/sudo was not enabled."
+    return
+  fi
+
   apt_install \
     zsh tmux curl wget git nano procps build-essential ca-certificates sshfs \
     locales locales-all ncurses-term fzf python3 python3-venv unzip xz-utils
@@ -38,7 +96,12 @@ install_base_packages() {
 }
 
 install_node() {
-  if [ "${INSTALL_NODE:-0}" != "1" ] || command -v node >/dev/null 2>&1; then
+  if [ "${INSTALL_NODE:-1}" = "0" ] || command -v node >/dev/null 2>&1; then
+    return
+  fi
+
+  if [ "$HAS_SYSTEM_INSTALL" != "1" ]; then
+    echo "Skipping Node.js/npm; root/sudo was not enabled."
     return
   fi
 
@@ -46,6 +109,11 @@ install_node() {
 }
 
 install_oh_my_zsh() {
+  if ! command -v zsh >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+    echo "Skipping Oh My Zsh; zsh or git is not available."
+    return
+  fi
+
   if [ ! -d "$HOME/.oh-my-zsh" ]; then
     sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
   fi
@@ -69,6 +137,11 @@ install_zoxide() {
 }
 
 install_tpm() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Skipping TPM; git is not available."
+    return
+  fi
+
   if [ ! -d "$HOME/.tmux/plugins/tpm" ]; then
     git clone --depth 1 https://github.com/tmux-plugins/tpm "$HOME/.tmux/plugins/tpm"
   fi
@@ -82,10 +155,34 @@ install_rust() {
 
 install_cargo_tools() {
   if command -v cargo >/dev/null 2>&1; then
-    cargo install --locked eza || cargo install eza
-    cargo install --locked bat || cargo install bat
-    cargo install --locked lolcrab || cargo install lolcrab
+    install_cargo_tool eza
+    install_cargo_tool bat
+    install_cargo_tool lolcrab
   fi
+}
+
+install_cargo_tool() {
+  local tool="$1"
+
+  if command -v "$tool" >/dev/null 2>&1; then
+    return
+  fi
+
+  if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+    echo "Skipping $tool; no C compiler is available."
+    return
+  fi
+
+  if cargo install --locked "$tool" || cargo install "$tool"; then
+    return
+  fi
+
+  if [ "$HAS_SYSTEM_INSTALL" = "1" ]; then
+    echo "Failed to install $tool." >&2
+    exit 1
+  fi
+
+  echo "Skipping $tool after cargo install failed."
 }
 
 install_fastfetch() {
@@ -93,26 +190,23 @@ install_fastfetch() {
     return
   fi
 
-  local url deb
-  url="$(curl -fsSL https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest \
-    | grep 'browser_download_url.*amd64.deb' \
-    | head -n 1 \
-    | cut -d '"' -f 4)"
+  local arch archive asset_dir
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *)
+      echo "Unsupported architecture for fastfetch: $(uname -m)" >&2
+      return
+      ;;
+  esac
 
-  if [ -z "$url" ]; then
-    echo "Could not find latest fastfetch amd64 deb release." >&2
-    exit 1
-  fi
-
-  deb="$(mktemp --suffix=.deb)"
-  curl -fsSL "$url" -o "$deb"
-  $SUDO apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update
-  $SUDO apt-get \
-    -o Acquire::Retries=5 \
-    -o Acquire::http::Timeout=60 \
-    install -y "$deb"
-  rm -f "$deb"
-  $SUDO rm -rf /var/lib/apt/lists/*
+  archive="$(mktemp --suffix=.tar.gz)"
+  asset_dir="fastfetch-linux-$arch"
+  mkdir -p "$HOME/.local/bin"
+  curl -fsSL "https://github.com/fastfetch-cli/fastfetch/releases/latest/download/$asset_dir.tar.gz" -o "$archive"
+  tar -xzf "$archive" --strip-components=3 -C "$HOME/.local/bin" "$asset_dir/usr/bin/fastfetch"
+  chmod +x "$HOME/.local/bin/fastfetch"
+  rm -f "$archive"
 }
 
 install_uv() {
@@ -130,6 +224,8 @@ install_claude() {
 }
 
 main() {
+  setup_system_install
+  write_state
   install_base_packages
   install_node
   install_oh_my_zsh

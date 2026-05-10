@@ -3,6 +3,14 @@ set -euo pipefail
 
 export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
+STATE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/install.env"
+SYSTEM_INSTALL=0
+
+if [ -f "$STATE_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$STATE_FILE"
+fi
+
 check_file() {
   test -f "$1" || {
     echo "missing file: $1" >&2
@@ -17,6 +25,13 @@ check_command() {
   }
 }
 
+warn_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "skipped command check: $1 is not installed" >&2
+    return
+  }
+}
+
 echo "Running dotfiles smoke check..."
 
 check_file "$HOME/.zshrc"
@@ -24,18 +39,33 @@ check_file "$HOME/.tmux.conf"
 check_file "$HOME/.config/fastfetch/config.jsonc"
 check_file "$HOME/.config/fastfetch/logo.ansi"
 
-check_command zsh
-check_command tmux
 check_command zoxide
 check_command fastfetch
 check_command uv
 check_command rustc
-check_command eza
-check_command bat
-check_command lolcrab
 
-zsh -ic 'echo zsh-ok'
-tmux -f "$HOME/.tmux.conf" start-server
+if [ "${SYSTEM_INSTALL:-0}" = "1" ]; then
+  check_command zsh
+  check_command tmux
+  check_command eza
+  check_command bat
+  check_command lolcrab
+else
+  warn_command zsh
+  warn_command tmux
+  warn_command eza
+  warn_command bat
+  warn_command lolcrab
+fi
+
+if command -v zsh >/dev/null 2>&1; then
+  zsh -ic 'echo zsh-ok'
+fi
+
+if command -v tmux >/dev/null 2>&1; then
+  tmux -f "$HOME/.tmux.conf" start-server
+fi
+
 fastfetch --config "$HOME/.config/fastfetch/config.jsonc" --pipe false >/tmp/fastfetch.out
 
 echo "Dotfiles smoke check passed."
