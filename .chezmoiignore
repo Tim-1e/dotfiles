@@ -1,0 +1,7 @@
+/README.md
+/bootstrap.sh
+/Dockerfile
+/scripts/**
+/test/**
+/.git/**
+/.gitignore
