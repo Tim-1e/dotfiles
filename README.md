@@ -69,7 +69,8 @@ Without sudo, system packages are skipped. If `zsh` is not available but
 `~/.local`.
 
 On older systems with old glibc, the latest fastfetch prebuilt binary may be
-incompatible. In that case it is skipped instead of failing the whole apply.
+incompatible. The installer falls back to fastfetch's polyfilled Linux binary
+when available, then skips fastfetch instead of failing the whole apply.
 
 ## Chezmoi files
 
