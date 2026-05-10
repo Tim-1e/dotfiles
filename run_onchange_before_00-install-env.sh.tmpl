@@ -2,5 +2,11 @@
 set -euo pipefail
 
 # scripts/install.sh checksum: {{ include "scripts/install.sh" | sha256sum }}
+# scripts/lib/common.sh checksum: {{ include "scripts/lib/common.sh" | sha256sum }}
+# scripts/install/system-packages.sh checksum: {{ include "scripts/install/system-packages.sh" | sha256sum }}
+# scripts/install/user-bins.sh checksum: {{ include "scripts/install/user-bins.sh" | sha256sum }}
+# scripts/install/zsh.sh checksum: {{ include "scripts/install/zsh.sh" | sha256sum }}
+# scripts/install/rust-tools.sh checksum: {{ include "scripts/install/rust-tools.sh" | sha256sum }}
+# scripts/install/fastfetch.sh checksum: {{ include "scripts/install/fastfetch.sh" | sha256sum }}
 
 bash "{{ .chezmoi.sourceDir }}/scripts/install.sh"
