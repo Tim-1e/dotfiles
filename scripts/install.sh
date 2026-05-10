@@ -174,7 +174,7 @@ install_user_eza() {
     aarch64|arm64) asset="eza_aarch64-unknown-linux-gnu_no_libgit.tar.gz" ;;
     *)
       echo "Skipping eza binary install; unsupported architecture: $(uname -m)"
-      return 1
+      return
       ;;
   esac
 
@@ -183,14 +183,14 @@ install_user_eza() {
   if ! curl -fsSL "https://github.com/eza-community/eza/releases/latest/download/$asset" -o "$archive"; then
     rm -f "$archive"
     echo "Skipping eza binary install; could not download $asset."
-    return 1
+    return
   fi
 
   member="$(tar -tzf "$archive" | grep -E '(^|/)eza$' | head -n 1)"
   if [ -z "$member" ]; then
     rm -f "$archive"
     echo "Skipping eza binary install; release archive did not contain eza."
-    return 1
+    return
   fi
 
   tar -xzf "$archive" -O "$member" > "$HOME/.local/bin/eza"
@@ -467,7 +467,7 @@ main() {
   install_base_packages
   install_node
   install_user_fzf
-  install_user_eza || true
+  install_user_eza
   install_user_zsh
   install_oh_my_zsh
   install_zoxide
