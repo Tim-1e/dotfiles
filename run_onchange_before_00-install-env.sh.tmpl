@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# scripts/install.sh checksum: {{ include "scripts/install.sh" | sha256sum }}
+
 bash "{{ .chezmoi.sourceDir }}/scripts/install.sh"

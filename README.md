@@ -79,5 +79,5 @@ when available, then skips fastfetch instead of failing the whole apply.
 - `dot_zshrc` -> `~/.zshrc`
 - `dot_tmux.conf` -> `~/.tmux.conf`
 - `dot_config/fastfetch/*` -> `~/.config/fastfetch/*`
-- `run_once_before_00-install-env.sh.tmpl` runs `scripts/install.sh` before applying dotfiles
-- `run_once_after_99-smoke-test.sh.tmpl` runs `test/smoke.sh` once after applying dotfiles
+- `run_onchange_before_00-install-env.sh.tmpl` runs `scripts/install.sh` before applying dotfiles when it changes
+- `run_after_99-smoke-test.sh.tmpl` runs `test/smoke.sh` after applying dotfiles
