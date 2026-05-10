@@ -5,6 +5,7 @@ export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export PATH="$CARGO_HOME/bin:$HOME/.local/bin:$PATH"
+ZSH_VERSION_TO_INSTALL="${ZSH_VERSION_TO_INSTALL:-5.9}"
 
 SUDO=""
 HAS_SYSTEM_INSTALL=0
@@ -114,6 +115,56 @@ install_node() {
   fi
 
   apt_install nodejs npm
+}
+
+install_user_zsh() {
+  if command -v zsh >/dev/null 2>&1; then
+    return
+  fi
+
+  if ! command -v make >/dev/null 2>&1; then
+    echo "Skipping user zsh build; make is not available."
+    return
+  fi
+
+  if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+    echo "Skipping user zsh build; no C compiler is available."
+    return
+  fi
+
+  if ! command -v tar >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; then
+    echo "Skipping user zsh build; tar or xz is not available."
+    return
+  fi
+
+  local build_dir archive jobs
+  build_dir="$(mktemp -d)"
+  archive="$build_dir/zsh-$ZSH_VERSION_TO_INSTALL.tar.xz"
+  jobs="2"
+  if command -v nproc >/dev/null 2>&1; then
+    jobs="$(nproc)"
+  fi
+
+  echo "Building zsh $ZSH_VERSION_TO_INSTALL into $HOME/.local..."
+  if curl -fsSL "https://www.zsh.org/pub/zsh-$ZSH_VERSION_TO_INSTALL.tar.xz" -o "$archive" \
+    && tar -xf "$archive" -C "$build_dir" \
+    && (
+      cd "$build_dir/zsh-$ZSH_VERSION_TO_INSTALL"
+      ./configure --prefix="$HOME/.local"
+      make -j"$jobs"
+      make install
+    ); then
+    rm -rf "$build_dir"
+    return
+  fi
+
+  rm -rf "$build_dir"
+  if [ "$HAS_SYSTEM_INSTALL" = "1" ]; then
+    echo "Failed to build zsh." >&2
+    exit 1
+  fi
+
+  echo "Skipping zsh after user build failed."
 }
 
 install_oh_my_zsh() {
@@ -236,6 +287,7 @@ main() {
   write_state
   install_base_packages
   install_node
+  install_user_zsh
   install_oh_my_zsh
   install_zoxide
   install_tpm

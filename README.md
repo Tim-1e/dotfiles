@@ -58,6 +58,10 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 - latest fastfetch release into `~/.local/bin`
 - Node.js and npm by default when system package installation is enabled
 
+Without sudo, system packages are skipped. If `zsh` is not available but
+`gcc`/`cc`, `make`, `tar`, and `xz` are present, zsh is built from source into
+`~/.local`.
+
 ## Chezmoi files
 
 - `dot_zshrc` -> `~/.zshrc`
