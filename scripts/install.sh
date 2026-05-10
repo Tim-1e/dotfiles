@@ -17,8 +17,11 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 apt_install() {
-  $SUDO apt-get update
-  $SUDO apt-get install -y --no-install-recommends "$@"
+  $SUDO apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update
+  $SUDO apt-get \
+    -o Acquire::Retries=5 \
+    -o Acquire::http::Timeout=60 \
+    install -y --no-install-recommends "$@"
   $SUDO rm -rf /var/lib/apt/lists/*
 }
 
@@ -96,8 +99,11 @@ install_fastfetch() {
 
   deb="$(mktemp --suffix=.deb)"
   curl -fsSL "$url" -o "$deb"
-  $SUDO apt-get update
-  $SUDO apt-get install -y "$deb"
+  $SUDO apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update
+  $SUDO apt-get \
+    -o Acquire::Retries=5 \
+    -o Acquire::http::Timeout=60 \
+    install -y "$deb"
   rm -f "$deb"
   $SUDO rm -rf /var/lib/apt/lists/*
 }
