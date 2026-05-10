@@ -24,8 +24,12 @@ setup_system_install() {
       ;;
     1|true|yes|YES|True)
       if command -v sudo >/dev/null 2>&1; then
-        SUDO="sudo"
-        HAS_SYSTEM_INSTALL=1
+        if sudo -v; then
+          SUDO="sudo"
+          HAS_SYSTEM_INSTALL=1
+        else
+          echo "sudo authentication failed; skipping system packages."
+        fi
       else
         echo "sudo not found; skipping system packages."
       fi
@@ -45,15 +49,19 @@ setup_system_install() {
   fi
 
   if [ -t 0 ] && [ -t 1 ]; then
-    printf "Use sudo to install system packages? [Y/n] "
+    printf "sudo is available but needs authentication. Use it to install system packages? [y/N] "
     read -r answer
     case "$answer" in
-      n|N|no|NO)
-        echo "Skipping system packages."
+      y|Y|yes|YES)
+        if sudo -v; then
+          SUDO="sudo"
+          HAS_SYSTEM_INSTALL=1
+        else
+          echo "sudo authentication failed; skipping system packages."
+        fi
         ;;
       *)
-        SUDO="sudo"
-        HAS_SYSTEM_INSTALL=1
+        echo "Skipping system packages."
         ;;
     esac
   else

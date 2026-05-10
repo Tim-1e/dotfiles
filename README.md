@@ -35,11 +35,18 @@ Skip them with:
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 ```
 
-System packages are installed when running as root or when sudo is enabled. To force
-skipping sudo-managed packages:
+System packages are installed when running as root or when passwordless sudo is
+available. If sudo needs a password, the installer asks before using it and
+defaults to no. To force skipping sudo-managed packages:
 
 ```sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
+```
+
+To explicitly use sudo:
+
+```sh
+DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 ```
 
 ## What it installs
