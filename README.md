@@ -35,6 +35,12 @@ Skip them with:
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 ```
 
+Skip fastfetch with:
+
+```sh
+INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
+```
+
 System packages are installed when running as root or when passwordless sudo is
 available. If sudo needs a password, the installer asks before using it and
 defaults to no. To force skipping sudo-managed packages:
@@ -61,6 +67,9 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 Without sudo, system packages are skipped. If `zsh` is not available but
 `gcc`/`cc`, `make`, `tar`, and `xz` are present, zsh is built from source into
 `~/.local`.
+
+On older systems with old glibc, the latest fastfetch prebuilt binary may be
+incompatible. In that case it is skipped instead of failing the whole apply.
 
 ## Chezmoi files
 

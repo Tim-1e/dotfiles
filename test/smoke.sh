@@ -40,9 +40,15 @@ check_file "$HOME/.config/fastfetch/config.jsonc"
 check_file "$HOME/.config/fastfetch/logo.ansi"
 
 check_command zoxide
-check_command fastfetch
 check_command uv
 check_command rustc
+
+FASTFETCH_OK=0
+if command -v fastfetch >/dev/null 2>&1 && fastfetch --version >/dev/null 2>&1; then
+  FASTFETCH_OK=1
+else
+  echo "skipped command check: fastfetch is not installed or not compatible" >&2
+fi
 
 if [ "${SYSTEM_INSTALL:-0}" = "1" ]; then
   check_command zsh
@@ -66,6 +72,8 @@ if command -v tmux >/dev/null 2>&1; then
   tmux -f "$HOME/.tmux.conf" start-server
 fi
 
-fastfetch --config "$HOME/.config/fastfetch/config.jsonc" --pipe false >/tmp/fastfetch.out
+if [ "$FASTFETCH_OK" = "1" ]; then
+  fastfetch --config "$HOME/.config/fastfetch/config.jsonc" --pipe false >/tmp/fastfetch.out
+fi
 
 echo "Dotfiles smoke check passed."

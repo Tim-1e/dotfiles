@@ -245,7 +245,12 @@ install_cargo_tool() {
 }
 
 install_fastfetch() {
-  if command -v fastfetch >/dev/null 2>&1; then
+  if [ "${INSTALL_FASTFETCH:-1}" = "0" ]; then
+    echo "Skipping fastfetch because INSTALL_FASTFETCH=0."
+    return
+  fi
+
+  if command -v fastfetch >/dev/null 2>&1 && fastfetch --version >/dev/null 2>&1; then
     return
   fi
 
@@ -266,6 +271,13 @@ install_fastfetch() {
   tar -xzf "$archive" --strip-components=3 -C "$HOME/.local/bin" "$asset_dir/usr/bin/fastfetch"
   chmod +x "$HOME/.local/bin/fastfetch"
   rm -f "$archive"
+
+  if "$HOME/.local/bin/fastfetch" --version >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "Skipping fastfetch; downloaded binary is not compatible with this system."
+  rm -f "$HOME/.local/bin/fastfetch"
 }
 
 install_uv() {
