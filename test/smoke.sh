@@ -40,6 +40,8 @@ check_file "$HOME/.config/fastfetch/config.jsonc"
 check_file "$HOME/.config/fastfetch/logo.ansi"
 
 check_command zoxide
+check_command fzf
+check_command eza
 check_command uv
 check_command rustc
 
@@ -53,13 +55,11 @@ fi
 if [ "${SYSTEM_INSTALL:-0}" = "1" ]; then
   check_command zsh
   check_command tmux
-  check_command eza
   check_command bat
   check_command lolcrab
 else
   warn_command zsh
   warn_command tmux
-  warn_command eza
   warn_command bat
   warn_command lolcrab
 fi

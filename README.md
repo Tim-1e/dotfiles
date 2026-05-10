@@ -67,6 +67,8 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 Without sudo, system packages are skipped. If `zsh` is not available but
 `gcc`/`cc`, `make`, `tar`, and `xz` are present, zsh is built from source into
 `~/.local`.
+`fzf` and `eza` are installed from upstream release binaries into `~/.local/bin`
+when system packages are skipped or unavailable.
 
 On older systems with old glibc, the latest fastfetch prebuilt binary may be
 incompatible. The installer falls back to fastfetch's polyfilled Linux binary
