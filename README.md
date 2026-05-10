@@ -49,10 +49,4 @@ INSTALL_NODE=1 bash ./bootstrap.sh
 - `dot_tmux.conf` -> `~/.tmux.conf`
 - `dot_config/fastfetch/*` -> `~/.config/fastfetch/*`
 - `run_once_before_00-install-env.sh.tmpl` runs `scripts/install.sh` before applying dotfiles
-
-## Docker smoke test
-
-```sh
-docker build -t dotfiles-test .
-docker run --rm dotfiles-test sh /opt/dotfiles/test/smoke.sh
-```
+- `run_once_after_99-smoke-test.sh.tmpl` runs `test/smoke.sh` once after applying dotfiles
