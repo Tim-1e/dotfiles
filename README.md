@@ -28,6 +28,12 @@ Install Claude Code as part of the deploy:
 INSTALL_CLAUDE=1 bash ./bootstrap.sh
 ```
 
+Install Node.js and npm as part of the deploy:
+
+```sh
+INSTALL_NODE=1 bash ./bootstrap.sh
+```
+
 ## What it installs
 
 - zsh, tmux, git, curl, wget, nano, fzf, build tools, locales
@@ -35,6 +41,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 - zoxide, TPM, rustup, uv
 - cargo tools: `eza`, `bat`, `lolcrab`
 - latest amd64 `.deb` release of fastfetch
+- optional Node.js and npm with `INSTALL_NODE=1`
 
 ## Chezmoi files
 

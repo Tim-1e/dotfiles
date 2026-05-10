@@ -28,14 +28,21 @@ apt_install() {
 install_base_packages() {
   apt_install \
     zsh tmux curl wget git nano procps build-essential ca-certificates sshfs \
-    locales locales-all ncurses-term fzf python3 python3-venv unzip xz-utils \
-    nodejs npm
+    locales locales-all ncurses-term fzf python3 python3-venv unzip xz-utils
 
   if command -v locale-gen >/dev/null 2>&1; then
     $SUDO locale-gen en_US.UTF-8 || true
     $SUDO locale-gen zh_CN.UTF-8 || true
     $SUDO update-locale LANG=en_US.UTF-8 || true
   fi
+}
+
+install_node() {
+  if [ "${INSTALL_NODE:-0}" != "1" ] || command -v node >/dev/null 2>&1; then
+    return
+  fi
+
+  apt_install nodejs npm
 }
 
 install_oh_my_zsh() {
@@ -124,6 +131,7 @@ install_claude() {
 
 main() {
   install_base_packages
+  install_node
   install_oh_my_zsh
   install_zoxide
   install_tpm
