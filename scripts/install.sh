@@ -15,11 +15,14 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/install/rust-tools.sh"
 # shellcheck source=install/fastfetch.sh
 . "$SCRIPT_DIR/install/fastfetch.sh"
+# shellcheck source=install/fonts.sh
+. "$SCRIPT_DIR/install/fonts.sh"
 
 main() {
   setup_system_install
   write_state
   install_base_packages
+  install_fonts
   install_node
   install_user_fzf
   install_user_eza

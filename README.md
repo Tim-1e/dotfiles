@@ -63,6 +63,7 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 - cargo tools: `eza`, `bat`, `lolcrab`
 - latest fastfetch release into `~/.local/bin`
 - Node.js and npm by default when system package installation is enabled
+- 0xProto Nerd Fonts into the current user's font directory
 
 Without sudo, system packages are skipped. If `zsh` is not available but
 `gcc`/`cc`, `make`, `tar`, and `xz` are present, zsh is built from source into
@@ -73,6 +74,20 @@ when system packages are skipped or unavailable.
 On older systems with old glibc, the latest fastfetch prebuilt binary may be
 incompatible. The installer falls back to fastfetch's polyfilled Linux binary
 when available, then skips fastfetch instead of failing the whole apply.
+
+## Fonts
+
+The bundled `0xProto` Nerd Font `.ttf` files are cross-platform, but each OS
+needs a different user-level install location:
+
+- Linux: `~/.local/share/fonts/0xProto`, followed by `fc-cache` when available
+- macOS: `~/Library/Fonts`
+- Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts` plus HKCU font registry entries
+
+On WSL, the Linux font install runs by default and also installs the fonts into
+the Windows host through PowerShell when available. Set
+`INSTALL_WINDOWS_FONTS_FROM_WSL=0` to skip the Windows host install. Set
+`INSTALL_FONTS=0` to skip font installation entirely.
 
 ## Chezmoi files
 

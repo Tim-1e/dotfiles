@@ -8,5 +8,20 @@ set -euo pipefail
 # scripts/install/zsh.sh checksum: {{ include "scripts/install/zsh.sh" | sha256sum }}
 # scripts/install/rust-tools.sh checksum: {{ include "scripts/install/rust-tools.sh" | sha256sum }}
 # scripts/install/fastfetch.sh checksum: {{ include "scripts/install/fastfetch.sh" | sha256sum }}
+# scripts/install/fonts.sh checksum: {{ include "scripts/install/fonts.sh" | sha256sum }}
+# scripts/install/fonts-windows.ps1 checksum: {{ include "scripts/install/fonts-windows.ps1" | sha256sum }}
+# 0xProto/README.md checksum: {{ include "0xProto/README.md" | sha256sum }}
+# 0xProto/0xProtoNerdFont-Bold.ttf checksum: {{ include "0xProto/0xProtoNerdFont-Bold.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFont-Italic.ttf checksum: {{ include "0xProto/0xProtoNerdFont-Italic.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFont-Regular.ttf checksum: {{ include "0xProto/0xProtoNerdFont-Regular.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontMono-Bold.ttf checksum: {{ include "0xProto/0xProtoNerdFontMono-Bold.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontMono-Italic.ttf checksum: {{ include "0xProto/0xProtoNerdFontMono-Italic.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontMono-Regular.ttf checksum: {{ include "0xProto/0xProtoNerdFontMono-Regular.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontMonoBold.ttf checksum: {{ include "0xProto/0xProtoNerdFontMonoBold.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontMonoItalic.ttf checksum: {{ include "0xProto/0xProtoNerdFontMonoItalic.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontMonoRegular.ttf checksum: {{ include "0xProto/0xProtoNerdFontMonoRegular.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontPropo-Bold.ttf checksum: {{ include "0xProto/0xProtoNerdFontPropo-Bold.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontPropo-Italic.ttf checksum: {{ include "0xProto/0xProtoNerdFontPropo-Italic.ttf" | sha256sum }}
+# 0xProto/0xProtoNerdFontPropo-Regular.ttf checksum: {{ include "0xProto/0xProtoNerdFontPropo-Regular.ttf" | sha256sum }}
 
-bash "{{ .chezmoi.sourceDir }}/scripts/install.sh"
+DOTFILES_SOURCE_DIR="{{ .chezmoi.sourceDir }}" bash "{{ .chezmoi.sourceDir }}/scripts/install.sh"

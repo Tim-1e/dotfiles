@@ -3,6 +3,9 @@ set -euo pipefail
 
 export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="${DOTFILES_SOURCE_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+
 STATE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/install.env"
 SYSTEM_INSTALL=0
 
@@ -44,6 +47,8 @@ check_command fzf
 check_command eza
 check_command uv
 check_command rustc
+
+bash "$SOURCE_DIR/test/fonts-smoke.sh"
 
 FASTFETCH_OK=0
 if command -v fastfetch >/dev/null 2>&1 && fastfetch --version >/dev/null 2>&1; then

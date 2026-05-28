@@ -2,5 +2,6 @@
 /bootstrap.sh
 /scripts/**
 /test/**
+/0xProto/**
 /.git/**
 /.gitignore
