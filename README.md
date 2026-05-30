@@ -29,9 +29,13 @@ Termux deploy:
 
 ```sh
 pkg update
-pkg install -y git chezmoi
+pkg install -y bash termux-exec git chezmoi
 chezmoi init --apply Tim-1e/dotfiles
 ```
+
+`termux-exec` provides `/usr/bin/env` and other standard paths that chezmoi
+scripts rely on. Without it, the first apply may fail with
+`fork/exec ... no such file or directory` even when bash is already installed.
 
 Install Claude Code as part of the deploy:
 
@@ -84,7 +88,9 @@ when system packages are skipped or unavailable.
 
 On Termux, packages are installed with `pkg` instead of `apt-get`, rust is
 installed from Termux packages instead of rustup, and Linux release binaries are
-skipped when they are not compatible with Android.
+skipped when they are not compatible with Android. Install `bash` and
+`termux-exec` before the first `chezmoi apply` so run-on-change scripts can
+execute.
 
 On older Linux systems with old glibc, the latest fastfetch prebuilt binary may
 be incompatible. The installer falls back to fastfetch's polyfilled Linux binary

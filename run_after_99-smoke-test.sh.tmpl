@@ -1,4 +1,8 @@
+{{ if eq .chezmoi.os "android" -}}
+#!{{ env "PREFIX" }}/bin/bash
+{{- else -}}
 #!/usr/bin/env bash
+{{- end }}
 set -euo pipefail
 
 export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"

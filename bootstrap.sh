@@ -15,7 +15,7 @@ install_chezmoi() {
 
   if is_termux && command -v pkg >/dev/null 2>&1; then
     pkg update -y
-    pkg install -y chezmoi git curl
+    pkg install -y bash termux-exec chezmoi git curl
     return
   fi
 

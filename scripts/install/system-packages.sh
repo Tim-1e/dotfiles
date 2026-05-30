@@ -8,8 +8,8 @@ install_base_packages() {
     fi
 
     termux_pkg_install \
-      zsh tmux curl wget git nano procps build-essential ca-certificates \
-      openssh fzf python unzip xz-utils
+      bash termux-exec zsh tmux curl wget git nano procps build-essential \
+      ca-certificates openssh fzf python unzip xz-utils
 
     termux_pkg_install_optional zoxide eza bat fastfetch
     return

@@ -34,7 +34,7 @@ install_base_packages
 install_node
 
 grep -q 'update -y' "$PKG_LOG"
-grep -q 'install -y zsh tmux curl wget git nano procps build-essential ca-certificates openssh fzf python unzip xz-utils' "$PKG_LOG"
+grep -q 'install -y bash termux-exec zsh tmux curl wget git nano procps build-essential ca-certificates openssh fzf python unzip xz-utils' "$PKG_LOG"
 grep -q 'install -y nodejs' "$PKG_LOG"
 
 echo "Termux platform smoke check passed."
