@@ -8,6 +8,7 @@ SOURCE_DIR="${DOTFILES_SOURCE_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
 
 STATE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/install.env"
 SYSTEM_INSTALL=0
+TERMUX=0
 
 if [ -f "$STATE_FILE" ]; then
   # shellcheck disable=SC1090
@@ -45,8 +46,13 @@ check_file "$HOME/.config/fastfetch/logo.ansi"
 check_command zoxide
 check_command fzf
 check_command eza
-check_command uv
 check_command rustc
+
+if [ "${TERMUX:-0}" = "1" ]; then
+  warn_command uv
+else
+  check_command uv
+fi
 
 bash "$SOURCE_DIR/test/fonts-smoke.sh"
 
@@ -57,7 +63,12 @@ else
   echo "skipped command check: fastfetch is not installed or not compatible" >&2
 fi
 
-if [ "${SYSTEM_INSTALL:-0}" = "1" ]; then
+if [ "${TERMUX:-0}" = "1" ]; then
+  check_command zsh
+  check_command tmux
+  check_command bat
+  warn_command lolcrab
+elif [ "${SYSTEM_INSTALL:-0}" = "1" ]; then
   check_command zsh
   check_command tmux
   check_command bat

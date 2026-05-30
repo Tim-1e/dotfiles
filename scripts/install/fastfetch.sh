@@ -10,6 +10,15 @@ install_fastfetch() {
     return
   fi
 
+  if is_termux; then
+    if [ "$HAS_SYSTEM_INSTALL" = "1" ]; then
+      termux_pkg_install_optional fastfetch
+    else
+      echo "Skipping fastfetch; Termux pkg was not available."
+    fi
+    return
+  fi
+
   local arch asset_dir polyfilled_asset
   case "$(uname -m)" in
     x86_64|amd64) arch="amd64" ;;

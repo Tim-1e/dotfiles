@@ -1,6 +1,9 @@
 # Dotfiles
 
-Chezmoi-managed shell environment for Debian/Ubuntu style Linux systems.
+[![CI](https://github.com/Tim-1e/dotfiles/actions/workflows/ci.yml/badge.svg)](https://github.com/Tim-1e/dotfiles/actions/workflows/ci.yml)
+
+Chezmoi-managed shell environment for Debian/Ubuntu style Linux systems, WSL,
+and Termux.
 
 ## One-command deploy
 
@@ -20,6 +23,14 @@ Local deploy from a cloned checkout:
 
 ```sh
 bash ./bootstrap.sh
+```
+
+Termux deploy:
+
+```sh
+pkg update
+pkg install -y git chezmoi
+chezmoi init --apply Tim-1e/dotfiles
 ```
 
 Install Claude Code as part of the deploy:
@@ -57,7 +68,7 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 
 ## What it installs
 
-- zsh, tmux, git, curl, wget, nano, fzf, build tools, locales
+- zsh, tmux, git, curl, wget, nano, fzf, build tools, locales where available
 - Oh My Zsh plus `zsh-autosuggestions` and `zsh-syntax-highlighting`
 - zoxide, TPM, rustup, uv
 - cargo tools: `eza`, `bat`, `lolcrab`
@@ -71,8 +82,12 @@ Without sudo, system packages are skipped. If `zsh` is not available but
 `fzf` and `eza` are installed from upstream release binaries into `~/.local/bin`
 when system packages are skipped or unavailable.
 
-On older systems with old glibc, the latest fastfetch prebuilt binary may be
-incompatible. The installer falls back to fastfetch's polyfilled Linux binary
+On Termux, packages are installed with `pkg` instead of `apt-get`, rust is
+installed from Termux packages instead of rustup, and Linux release binaries are
+skipped when they are not compatible with Android.
+
+On older Linux systems with old glibc, the latest fastfetch prebuilt binary may
+be incompatible. The installer falls back to fastfetch's polyfilled Linux binary
 when available, then skips fastfetch instead of failing the whole apply.
 
 ## Fonts

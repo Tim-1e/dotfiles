@@ -5,6 +5,11 @@ install_user_fzf() {
     return
   fi
 
+  if is_termux; then
+    echo "Skipping fzf binary install on Termux; use pkg install fzf."
+    return
+  fi
+
   local arch version archive member
   case "$(uname -m)" in
     x86_64|amd64) arch="amd64" ;;
@@ -51,6 +56,11 @@ install_user_eza() {
     return
   fi
 
+  if is_termux; then
+    echo "Skipping eza binary install on Termux; use pkg install eza."
+    return
+  fi
+
   local asset archive member
   case "$(uname -m)" in
     x86_64|amd64) asset="eza_x86_64-unknown-linux-musl.tar.gz" ;;
@@ -83,6 +93,15 @@ install_user_eza() {
 
 install_zoxide() {
   if ! command -v zoxide >/dev/null 2>&1; then
+    if is_termux; then
+      if [ "$HAS_SYSTEM_INSTALL" = "1" ]; then
+        termux_pkg_install_optional zoxide
+      else
+        echo "Skipping zoxide; Termux pkg was not available."
+      fi
+      return
+    fi
+
     curl -sSf https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh
   fi
 }
@@ -100,6 +119,15 @@ install_tpm() {
 
 install_uv() {
   if ! command -v uv >/dev/null 2>&1; then
+    if is_termux; then
+      if [ "$HAS_SYSTEM_INSTALL" = "1" ]; then
+        termux_pkg_install_optional uv
+      else
+        echo "Skipping uv; Termux pkg was not available."
+      fi
+      return
+    fi
+
     curl -LsSf https://astral.sh/uv/install.sh | sh
   fi
 }

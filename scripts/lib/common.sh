@@ -10,8 +10,26 @@ SUDO=""
 HAS_SYSTEM_INSTALL=0
 STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles"
 STATE_FILE="$STATE_DIR/install.env"
+TERMUX_PKG_UPDATED=0
+
+is_termux() {
+  if [ -n "${TERMUX_VERSION:-}" ] || [ -n "${TERMUX_APK_RELEASE:-}" ]; then
+    return 0
+  fi
+
+  [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ]
+}
 
 setup_system_install() {
+  if is_termux; then
+    if command -v pkg >/dev/null 2>&1; then
+      HAS_SYSTEM_INSTALL=1
+    else
+      echo "Termux detected but pkg was not found; skipping system packages."
+    fi
+    return
+  fi
+
   if [ "$(id -u)" -eq 0 ]; then
     HAS_SYSTEM_INSTALL=1
     return
@@ -73,6 +91,7 @@ write_state() {
   mkdir -p "$STATE_DIR"
   {
     echo "SYSTEM_INSTALL=$HAS_SYSTEM_INSTALL"
+    echo "TERMUX=$(is_termux && echo 1 || echo 0)"
     echo "INSTALL_NODE=${INSTALL_NODE:-1}"
     echo "INSTALL_FONTS=${INSTALL_FONTS:-1}"
     echo "INSTALL_WINDOWS_FONTS_FROM_WSL=${INSTALL_WINDOWS_FONTS_FROM_WSL:-1}"
@@ -86,4 +105,32 @@ apt_install() {
     -o Acquire::http::Timeout=60 \
     install -y --no-install-recommends "$@"
   $SUDO rm -rf /var/lib/apt/lists/*
+}
+
+termux_pkg_update_once() {
+  if [ "$TERMUX_PKG_UPDATED" = "1" ]; then
+    return
+  fi
+
+  pkg update -y
+  TERMUX_PKG_UPDATED=1
+}
+
+termux_pkg_install() {
+  termux_pkg_update_once
+  pkg install -y "$@"
+}
+
+termux_pkg_install_optional() {
+  local package
+
+  for package in "$@"; do
+    if command -v "$package" >/dev/null 2>&1; then
+      continue
+    fi
+
+    if ! termux_pkg_install "$package"; then
+      echo "Skipping optional Termux package: $package"
+    fi
+  done
 }

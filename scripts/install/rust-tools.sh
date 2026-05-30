@@ -2,6 +2,19 @@
 
 install_rust() {
   if ! command -v rustup >/dev/null 2>&1; then
+    if is_termux; then
+      if command -v rustc >/dev/null 2>&1; then
+        return
+      fi
+
+      if [ "$HAS_SYSTEM_INSTALL" = "1" ]; then
+        termux_pkg_install_optional rust
+      else
+        echo "Skipping Rust; Termux pkg was not available."
+      fi
+      return
+    fi
+
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
   fi
 
@@ -32,6 +45,11 @@ install_cargo_tool() {
   fi
 
   if cargo install --locked "$tool" || cargo install "$tool"; then
+    return
+  fi
+
+  if is_termux; then
+    echo "Skipping $tool after cargo install failed on Termux."
     return
   fi
 

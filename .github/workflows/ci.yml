@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux and Termux Mock
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check shell syntax
+        run: |
+          bash -n \
+            bootstrap.sh \
+            scripts/install.sh \
+            scripts/lib/common.sh \
+            scripts/install/system-packages.sh \
+            scripts/install/user-bins.sh \
+            scripts/install/zsh.sh \
+            scripts/install/rust-tools.sh \
+            scripts/install/fastfetch.sh \
+            scripts/install/fonts.sh \
+            test/smoke.sh \
+            test/fonts-smoke.sh \
+            test/termux-platform-smoke.sh
+
+      - name: Test font install
+        run: |
+          ./scripts/install/fonts.sh
+          ./test/fonts-smoke.sh
+
+      - name: Test Termux platform branch
+        run: ./test/termux-platform-smoke.sh
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check shell syntax
+        run: |
+          bash -n \
+            bootstrap.sh \
+            scripts/install.sh \
+            scripts/lib/common.sh \
+            scripts/install/system-packages.sh \
+            scripts/install/user-bins.sh \
+            scripts/install/zsh.sh \
+            scripts/install/rust-tools.sh \
+            scripts/install/fastfetch.sh \
+            scripts/install/fonts.sh \
+            test/smoke.sh \
+            test/fonts-smoke.sh
+
+      - name: Test font install
+        run: |
+          ./scripts/install/fonts.sh
+          ./test/fonts-smoke.sh
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check PowerShell syntax
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/fonts-windows.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("test/fonts-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List
+            exit 1
+          }
+
+      - name: Test font install
+        run: |
+          ./scripts/install/fonts-windows.ps1 -SourceDir "$PWD/0xProto"
+          ./test/fonts-smoke.ps1 -SourceDir "$PWD/0xProto"

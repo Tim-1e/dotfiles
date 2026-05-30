@@ -3,8 +3,19 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
+is_termux() {
+  [ -n "${TERMUX_VERSION:-}" ] \
+    || [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ]
+}
+
 install_chezmoi() {
   if command -v chezmoi >/dev/null 2>&1; then
+    return
+  fi
+
+  if is_termux && command -v pkg >/dev/null 2>&1; then
+    pkg update -y
+    pkg install -y chezmoi git curl
     return
   fi
 
