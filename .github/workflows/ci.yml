@@ -7,8 +7,8 @@ on:
   pull_request:
 
 jobs:
-  linux:
-    name: Linux and Termux Mock
+  linux-quick:
+    name: Linux Quick Checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,6 +37,26 @@ jobs:
 
       - name: Test Termux platform branch
         run: ./test/termux-platform-smoke.sh
+
+  linux-full:
+    name: Linux Full Install
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply dotfiles from bootstrap
+        env:
+          DOTFILES_USE_SUDO: "1"
+          INSTALL_CLAUDE: "0"
+          INSTALL_WINDOWS_FONTS_FROM_WSL: "0"
+        run: bash ./bootstrap.sh
+
+      - name: Run full smoke check
+        env:
+          DOTFILES_SOURCE_DIR: ${{ github.workspace }}
+        run: bash ./test/smoke.sh
 
   macos:
     name: macOS
