@@ -242,7 +242,7 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 process.stdout.write(JSON.stringify(out));
-' "$@"
+' -- "$@"
 }
 
 _ai_mgmt_value() {
@@ -766,6 +766,117 @@ _cc_remove_profile() {
   echo "  Registry: $AI_REGISTRY_PATH"
 }
 
+_ai_token_format() {
+  node -e '
+const value = Number(process.argv[1] || 0);
+if (value >= 1000000) process.stdout.write(`${(value / 1000000).toFixed(2)}M`);
+else if (value >= 1000) process.stdout.write(`${(value / 1000).toFixed(1)}K`);
+else process.stdout.write(String(value));
+' "$1"
+}
+
+_ai_token_bar() {
+  node -e '
+const value = Number(process.argv[1] || 0);
+const total = Number(process.argv[2] || 0);
+if (value <= 0 || total <= 0) process.exit(0);
+const width = Math.max(1, Math.round((value / total) * 24));
+process.stdout.write("#".repeat(width));
+' "$1" "$2"
+}
+
+_cx_rollout_stats_json() {
+  local codex_home="$1" days="$2"
+  _ai_require_node || return 1
+  node -e '
+const fs = require("fs");
+const path = require("path");
+const root = process.argv[1];
+const days = Number(process.argv[2] || 30);
+const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+const stats = { sessions: 0, samples: 0, input: 0, cachedInput: 0, output: 0, reasoningOutput: 0, total: 0 };
+const sessions = path.join(root, "sessions");
+const walk = (dir) => {
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walk(full));
+    else if (entry.isFile() && entry.name.endsWith(".jsonl")) out.push(full);
+  }
+  return out;
+};
+for (const file of walk(sessions)) {
+  let st;
+  try { st = fs.statSync(file); } catch { continue; }
+  if (st.mtimeMs < cutoff) continue;
+  let latest = null;
+  let samples = 0;
+  let text = "";
+  try { text = fs.readFileSync(file, "utf8"); } catch { continue; }
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.includes("\"token_count\"")) continue;
+    try {
+      const j = JSON.parse(line);
+      if (j.type !== "event_msg" || !j.payload || j.payload.type !== "token_count") continue;
+      const usage = j.payload.info && j.payload.info.total_token_usage;
+      if (!usage) continue;
+      latest = usage;
+      samples += 1;
+    } catch {}
+  }
+  if (!latest) continue;
+  const input = Number(latest.input_tokens || 0);
+  const cached = Number(latest.cached_input_tokens || latest.cache_read_input_tokens || 0);
+  const output = Number(latest.output_tokens || 0);
+  const reasoning = Number(latest.reasoning_output_tokens || 0);
+  const total = Number(latest.total_tokens || input + output);
+  stats.sessions += 1;
+  stats.samples += samples;
+  stats.input += input;
+  stats.cachedInput += cached;
+  stats.output += output;
+  stats.reasoningOutput += reasoning;
+  stats.total += total;
+}
+process.stdout.write(JSON.stringify(stats));
+' "$codex_home" "$days"
+}
+
+_cx_stats() {
+  local parsed days saved profile_json codex_home json sessions samples total input cached output reasoning
+  parsed="$(_ai_parse_management_args "$@")" || return
+  days="$(_ai_mgmt_value "$parsed" days 30)"
+  case "$days" in
+    ''|*[!0-9]*)
+      echo "cx stats --days must be a positive integer." >&2
+      return 1
+      ;;
+  esac
+  [ "$days" -ge 1 ] || { echo "cx stats --days must be a positive integer." >&2; return 1; }
+  saved="$(_ai_saved_profile codex)"
+  profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$saved}")" || profile_json="$(_ai_profile_json codex "$(_ai_default_profile codex)")" || return 1
+  codex_home="${CODEX_HOME:-$(_codex_home "$profile_json")}"
+  json="$(_cx_rollout_stats_json "$codex_home" "$days")" || return
+  sessions="$(node -e 'const j=JSON.parse(process.argv[1]); process.stdout.write(String(j.sessions));' "$json")"
+  samples="$(node -e 'const j=JSON.parse(process.argv[1]); process.stdout.write(String(j.samples));' "$json")"
+  total="$(node -e 'const j=JSON.parse(process.argv[1]); process.stdout.write(String(j.total));' "$json")"
+  input="$(node -e 'const j=JSON.parse(process.argv[1]); process.stdout.write(String(j.input));' "$json")"
+  cached="$(node -e 'const j=JSON.parse(process.argv[1]); process.stdout.write(String(j.cachedInput));' "$json")"
+  output="$(node -e 'const j=JSON.parse(process.argv[1]); process.stdout.write(String(j.output));' "$json")"
+  reasoning="$(node -e 'const j=JSON.parse(process.argv[1]); process.stdout.write(String(j.reasoningOutput));' "$json")"
+  echo "Codex local token stats:"
+  echo "  CODEX_HOME: $codex_home"
+  echo "  Window: last $days days"
+  echo "  Sessions with usage: $sessions"
+  echo "  Token samples: $samples"
+  echo "  Total: $(_ai_token_format "$total") ($total)"
+  printf '  %-9s %10s  %s\n' input "$(_ai_token_format "$input")" "$(_ai_token_bar "$input" "$total")"
+  printf '  %-9s %10s  %s\n' cached "$(_ai_token_format "$cached")" "$(_ai_token_bar "$cached" "$total")"
+  printf '  %-9s %10s  %s\n' output "$(_ai_token_format "$output")" "$(_ai_token_bar "$output" "$total")"
+  printf '  %-9s %10s  %s\n' reasoning "$(_ai_token_format "$reasoning")" "$(_ai_token_bar "$reasoning" "$total")"
+}
+
 _cx_print_status() {
   local profile_json="$1" mode name profile_file base_url
   mode="$(_ai_profile_value "$profile_json" mode sub)"
@@ -899,6 +1010,7 @@ Usage:
   cx api:docker      Use a named API profile
   cx list            List registry profiles
   cx status          Print current state
+  cx stats           Summarize local rollout token usage
   cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
@@ -931,6 +1043,11 @@ EOF
       echo "  OPENAI_API_KEY: $(_ai_secret_preview "${OPENAI_API_KEY:-}")"
       echo "  Cached login: $(_codex_login_status)"
       profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _cx_doctor_summary "$profile_json"
+      return
+      ;;
+    stats)
+      shift
+      _cx_stats "$@"
       return
       ;;
     add-api)

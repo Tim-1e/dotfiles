@@ -20,6 +20,12 @@ $secretsPath = Join-Path $secretsDir "secrets.toml"
 try {
   New-Item -ItemType Directory -Force -Path $aiEnvDir, $codexDir, $secretsDir | Out-Null
   Copy-Item -LiteralPath (Join-Path $SourceDir "dot_ai-env/create_profiles.json") -Destination $profilesPath -Force
+  $sessionDir = Join-Path $codexDir "sessions\2026\06\09"
+  New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+  @'
+{"timestamp":"2026-06-09T00:00:00.000Z","type":"session_meta","payload":{"id":"stats-smoke","cwd":"I:\\CodeX_desk\\dotfiles"}}
+{"timestamp":"2026-06-09T00:01:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":700,"output_tokens":200,"reasoning_output_tokens":50,"total_tokens":1200}}}}
+'@ | Set-Content -LiteralPath (Join-Path $sessionDir "rollout-2026-06-09T00-00-00-stats-smoke.jsonl") -Encoding UTF8
   Remove-Item -LiteralPath $statePath -ErrorAction SilentlyContinue
   @"
 [codex.api]
@@ -36,6 +42,7 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-token"
   $cxList = (& { cx list } 6>&1 | Out-String -Width 4096)
   $ccHelp = (& { cc help } 6>&1 | Out-String -Width 4096)
   $ccList = (& { cc list } 6>&1 | Out-String -Width 4096)
+  $cxStats = (& { cx stats --days 365 } 6>&1 | Out-String -Width 4096)
   $cxAddApi = (& { cx add-api api:test --base-url https://router.test/v1 --model gpt-test } 6>&1 | Out-String -Width 4096)
   $cxAddSub = (& { cx add-sub sub:test } 6>&1 | Out-String -Width 4096)
   $ccAddApi = (& { cc add-api api:test --base-url https://claude.test } 6>&1 | Out-String -Width 4096)
@@ -58,6 +65,8 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-token"
   if ($ccHelp -notmatch "cc - switch Claude Code state") { throw "cc help output missing header" }
   if ($ccList -notmatch "Claude Code profiles") { throw "cc list output missing header" }
   if ($ccList -notmatch "secrets\.toml#claude\.api-docker") { throw "cc list did not report TOML secret source" }
+  if ($cxStats -notmatch "Codex local token stats") { throw "cx stats output missing header" }
+  if ($cxStats -notmatch "Total:\s+1\.2K \(1200\)") { throw "cx stats did not summarize fixture tokens" }
   if ($cxHelp -notmatch "cx add-api NAME") { throw "cx help output missing add-api" }
   if ($ccHelp -notmatch "cc add-api NAME") { throw "cc help output missing add-api" }
   if ($cxAddApi -notmatch "Added Codex API profile 'api:test'") { throw "cx add-api did not report success" }

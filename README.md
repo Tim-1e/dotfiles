@@ -126,6 +126,7 @@ Claude Code environments without launching either tool:
 cx list
 cx sub
 cx api
+cx stats
 cx add-api api:work --base-url https://router.example/v1
 cx add-sub sub:work
 
@@ -164,6 +165,11 @@ profiles also create `~/.codex/<profile>.config.toml`. Put real tokens in
 `cx remove NAME` or `cc remove NAME` to remove a registration. By default, Codex
 API profiles keep `home: ~/.codex` so sessions and history remain shared across
 projects.
+
+`cx stats` gives a quick local-only usage view by scanning recent Codex rollout
+JSONL files under `CODEX_HOME/sessions`. It reports total, input, cached input,
+output, and reasoning token counts with a small text bar chart. It does not call
+network APIs and does not estimate cost.
 
 Local Codex/Claude settings are conservative: the dotfiles create default
 `~/.codex/*.config.toml`, `~/.claude/settings.json`, and

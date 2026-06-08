@@ -1129,6 +1129,134 @@ function Remove-ClaudeProfile {
   Write-Host "  Registry: $script:AiRegistryPath"
 }
 
+function Get-CodexRolloutTokenStats {
+  param(
+    [Parameter(Mandatory = $true)][string]$CodexHome,
+    [int]$Days = 30
+  )
+
+  $sessionsDir = Join-Path $CodexHome "sessions"
+  $cutoff = (Get-Date).ToUniversalTime().AddDays(-1 * $Days)
+  $stats = [ordered]@{
+    Sessions = 0
+    Samples = 0
+    Input = 0L
+    CachedInput = 0L
+    Output = 0L
+    ReasoningOutput = 0L
+    Total = 0L
+    Since = $cutoff
+  }
+
+  if (-not (Test-Path -LiteralPath $sessionsDir)) {
+    return [pscustomobject]$stats
+  }
+
+  foreach ($file in Get-ChildItem -LiteralPath $sessionsDir -Recurse -File -Filter "*.jsonl" -ErrorAction SilentlyContinue) {
+    if ($file.LastWriteTimeUtc -lt $cutoff) {
+      continue
+    }
+
+    $latest = $null
+    $samples = 0
+    foreach ($line in Get-Content -LiteralPath $file.FullName -ErrorAction SilentlyContinue) {
+      if ($line -notlike '*"token_count"*') {
+        continue
+      }
+      try {
+        $json = $line | ConvertFrom-Json
+        if ($json.type -ne "event_msg" -or $json.payload.type -ne "token_count") {
+          continue
+        }
+        $usage = $json.payload.info.total_token_usage
+        if ($usage) {
+          $latest = $usage
+          $samples++
+        }
+      } catch {
+      }
+    }
+
+    if ($latest) {
+      $stats.Sessions++
+      $stats.Samples += $samples
+      $stats.Input += [int64](Get-AiProperty -Object $latest -Name "input_tokens" -Default 0)
+      $stats.CachedInput += [int64](Get-AiProperty -Object $latest -Name "cached_input_tokens" -Default (Get-AiProperty -Object $latest -Name "cache_read_input_tokens" -Default 0))
+      $stats.Output += [int64](Get-AiProperty -Object $latest -Name "output_tokens" -Default 0)
+      $stats.ReasoningOutput += [int64](Get-AiProperty -Object $latest -Name "reasoning_output_tokens" -Default 0)
+      $total = [int64](Get-AiProperty -Object $latest -Name "total_tokens" -Default 0)
+      if ($total -le 0) {
+        $total = [int64](Get-AiProperty -Object $latest -Name "input_tokens" -Default 0) + [int64](Get-AiProperty -Object $latest -Name "output_tokens" -Default 0)
+      }
+      $stats.Total += $total
+    }
+  }
+
+  return [pscustomobject]$stats
+}
+
+function Format-AiTokenCount {
+  param([int64]$Value)
+
+  if ($Value -ge 1000000) {
+    return ("{0:N2}M" -f ($Value / 1000000.0))
+  }
+  if ($Value -ge 1000) {
+    return ("{0:N1}K" -f ($Value / 1000.0))
+  }
+  return [string]$Value
+}
+
+function Format-AiTokenBar {
+  param(
+    [int64]$Value,
+    [int64]$Total
+  )
+
+  if ($Total -le 0 -or $Value -le 0) {
+    return ""
+  }
+
+  $width = [Math]::Max(1, [Math]::Round(($Value / [double]$Total) * 24))
+  return ("#" * $width)
+}
+
+function Show-CodexStats {
+  param([string[]]$Arguments)
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  $daysText = Get-AiOption -Options $parsed.Options -Name "days" -Default "30"
+  $days = 30
+  if (-not [int]::TryParse($daysText, [ref]$days) -or $days -lt 1) {
+    throw "cx stats --days must be a positive integer."
+  }
+
+  $saved = Get-AiSavedProfileName -Tool "codex"
+  $profile = Get-AiProfileByName -Tool "codex" -Name ($env:AI_CODEX_LABEL ?? $saved)
+  if (-not $profile) {
+    $profile = Get-AiProfileByName -Tool "codex" -Name (Get-AiDefaultProfileName -Tool "codex")
+  }
+  $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } elseif ($profile) { Get-CodexHome -Profile $profile } else { Join-Path $script:AiHome ".codex" }
+  $stats = Get-CodexRolloutTokenStats -CodexHome $codexHome -Days $days
+
+  Write-Host "Codex local token stats:"
+  Write-Host "  CODEX_HOME: $codexHome"
+  Write-Host "  Window: last $days days"
+  Write-Host "  Sessions with usage: $($stats.Sessions)"
+  Write-Host "  Token samples: $($stats.Samples)"
+  Write-Host "  Total: $(Format-AiTokenCount $stats.Total) ($($stats.Total))"
+  foreach ($row in @(
+    @("input", $stats.Input),
+    @("cached", $stats.CachedInput),
+    @("output", $stats.Output),
+    @("reasoning", $stats.ReasoningOutput)
+  )) {
+    $label = $row[0]
+    $value = [int64]$row[1]
+    Write-Host ("  {0,-9} {1,10}  {2}" -f $label, (Format-AiTokenCount $value), (Format-AiTokenBar -Value $value -Total $stats.Total))
+  }
+}
+
 function Get-CodexBaseUrl {
   param([Parameter(Mandatory = $true)]$Profile)
 
@@ -1212,6 +1340,7 @@ Usage:
   cx api:docker      Use a named API profile
   cx list            List registry profiles and local file status
   cx status          Print current saved/process state
+  cx stats           Summarize local rollout token usage
   cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
@@ -1397,6 +1526,7 @@ function cx {
       { $_ -in @("help", "-h", "--help", "/?") } { Show-CxHelp; return }
       "list" { Show-CodexList; return }
       "status" { Show-CodexStatus; return }
+      "stats" { Show-CodexStats -Arguments @($remaining | Select-Object -Skip 1); return }
       "add-api" { Add-CodexApiProfile -Arguments @($remaining | Select-Object -Skip 1); return }
       "add-sub" { Add-CodexSubProfile -Arguments @($remaining | Select-Object -Skip 1); return }
       "remove" { Remove-CodexProfile -Arguments @($remaining | Select-Object -Skip 1); return }

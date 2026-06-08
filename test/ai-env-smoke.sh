@@ -18,6 +18,11 @@ cp "$SOURCE_DIR/dot_local/share/ai-env/ai-env.sh" "$tmp_home/.local/share/ai-env
 cp "$SOURCE_DIR/dot_ai-env/create_profiles.json" "$tmp_home/.ai-env/profiles.json"
 cp "$SOURCE_DIR/dot_codex/create_sub.config.toml" "$tmp_home/.codex/sub.config.toml"
 cp "$SOURCE_DIR/dot_codex/create_api.config.toml" "$tmp_home/.codex/api.config.toml"
+mkdir -p "$tmp_home/.codex/sessions/2026/06/09"
+cat >"$tmp_home/.codex/sessions/2026/06/09/rollout-2026-06-09T00-00-00-stats-smoke.jsonl" <<'EOF'
+{"timestamp":"2026-06-09T00:00:00.000Z","type":"session_meta","payload":{"id":"stats-smoke","cwd":"/workspace"}}
+{"timestamp":"2026-06-09T00:01:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":700,"output_tokens":200,"reasoning_output_tokens":50,"total_tokens":1200}}}}
+EOF
 printf '%s\n' \
   '{' \
   '  "codex": "sub",' \
@@ -59,6 +64,7 @@ assert_contains() {
 
   run_step cx-help cx help
   run_step cx-list cx list
+  run_step cx-stats cx stats --days 365
   run_step cc-help cc help
   run_step cc-list cc list
   run_step cx-add-api cx add-api api:test --base-url https://router.test/v1 --model gpt-test
@@ -80,6 +86,8 @@ assert_contains() {
   assert_contains "cx add-api NAME" "$debug_dir/cx-help.out"
   assert_contains "Codex profiles" "$debug_dir/cx-list.out"
   assert_contains "secrets.toml#codex.api" "$debug_dir/cx-list.out"
+  assert_contains "Codex local token stats" "$debug_dir/cx-stats.out"
+  assert_contains "Total: 1.2K (1200)" "$debug_dir/cx-stats.out"
   assert_contains "cc - switch Claude Code state" "$debug_dir/cc-help.out"
   assert_contains "cc add-api NAME" "$debug_dir/cc-help.out"
   assert_contains "Claude Code profiles" "$debug_dir/cc-list.out"
