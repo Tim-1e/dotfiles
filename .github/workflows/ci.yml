@@ -93,8 +93,8 @@ jobs:
       - name: Test AI env shell helpers
         run: ./test/ai-env-smoke.sh
 
-  windows:
-    name: Windows
+  windows-quick:
+    name: Windows Quick Checks
     runs-on: windows-latest
     defaults:
       run:
@@ -109,10 +109,13 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/fonts-windows.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/powershell-profile-deps.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("bootstrap.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("Documents/PowerShell/Scripts/ai-env.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/fonts-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/ai-env-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("test/powershell-profile-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("test/windows-full-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) {
             $errors | Format-List
             exit 1
@@ -121,7 +124,27 @@ jobs:
       - name: Test AI env PowerShell helpers
         run: ./test/ai-env-smoke.ps1 -SourceDir "$PWD"
 
+      - name: Test PowerShell profile load
+        run: ./test/powershell-profile-smoke.ps1 -SourceDir "$PWD"
+
       - name: Test font install
         run: |
           ./scripts/install/fonts-windows.ps1 -SourceDir "$PWD/0xProto"
           ./test/fonts-smoke.ps1 -SourceDir "$PWD/0xProto"
+
+  windows-full:
+    name: Windows Full Install
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply dotfiles from bootstrap
+        run: ./bootstrap.ps1 -SourceDir "$PWD"
+
+      - name: Run full Windows smoke check
+        run: ./test/windows-full-smoke.ps1 -SourceDir "$PWD"
