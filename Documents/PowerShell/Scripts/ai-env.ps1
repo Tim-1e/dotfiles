@@ -1,8 +1,9 @@
-$script:AiConfigDir = Join-Path $HOME ".ai-env"
+$script:AiHome = if ($env:AI_ENV_HOME) { [Environment]::ExpandEnvironmentVariables($env:AI_ENV_HOME) } else { $HOME }
+$script:AiConfigDir = Join-Path $script:AiHome ".ai-env"
 $script:AiRegistryPath = Join-Path $script:AiConfigDir "profiles.json"
 $script:AiStatePath = Join-Path $script:AiConfigDir "state.json"
-$script:AiSecretsPath = Join-Path $HOME ".ai-secrets\secrets.toml"
-$script:LegacyAiStateDir = Join-Path $HOME ".ai-state"
+$script:AiSecretsPath = Join-Path $script:AiHome ".ai-secrets\secrets.toml"
+$script:LegacyAiStateDir = Join-Path $script:AiHome ".ai-state"
 $script:ClaudeRouterBaseUrl = "https://anyrouter.top"
 
 function Get-AiProperty {
@@ -33,11 +34,11 @@ function Expand-AiPath {
 
   $expanded = [Environment]::ExpandEnvironmentVariables($Path)
   if ($expanded -eq "~") {
-    return $HOME
+    return $script:AiHome
   }
 
   if ($expanded.StartsWith("~/") -or $expanded.StartsWith("~\")) {
-    return (Join-Path $HOME $expanded.Substring(2))
+    return (Join-Path $script:AiHome $expanded.Substring(2))
   }
 
   return $expanded
@@ -260,6 +261,155 @@ function Save-AiSelectedProfile {
   $state.updated_at = (Get-Date).ToUniversalTime().ToString("o")
   New-Item -ItemType Directory -Force -Path $script:AiConfigDir | Out-Null
   $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:AiStatePath -Encoding UTF8
+}
+
+function Save-AiRegistry {
+  param([Parameter(Mandatory = $true)]$Registry)
+
+  New-Item -ItemType Directory -Force -Path $script:AiConfigDir | Out-Null
+  $Registry | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $script:AiRegistryPath -Encoding UTF8
+}
+
+function Get-AiNameSlug {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  $slug = $Name.Trim().ToLowerInvariant() -replace '[^a-z0-9_-]+', '-'
+  $slug = $slug.Trim("-_")
+  if (-not $slug) {
+    throw "Profile name '$Name' does not contain any usable letters or numbers."
+  }
+
+  return $slug
+}
+
+function Assert-AiProfileName {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9:_-]*$') {
+    throw "Profile name '$Name' is not supported. Use letters, numbers, ':', '_' or '-'."
+  }
+}
+
+function Test-AiProfileNameExists {
+  param(
+    [Parameter(Mandatory = $true)]$Registry,
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+
+  $query = $Name.ToLowerInvariant()
+  foreach ($profile in @(Get-AiProperty -Object $Registry -Name $Tool -Default @())) {
+    foreach ($candidate in Get-AiProfileNames -Profile $profile) {
+      if ($candidate.ToLowerInvariant() -eq $query) {
+        return $true
+      }
+    }
+  }
+
+  return $false
+}
+
+function Add-AiProfileRegistration {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile
+  )
+
+  $name = Get-AiProfileName -Profile $Profile
+  Assert-AiProfileName -Name $name
+  $registry = Get-AiRegistry
+  if (Test-AiProfileNameExists -Registry $registry -Tool $Tool -Name $name) {
+    throw "$Tool profile '$name' already exists. Remove it first, or choose another name."
+  }
+
+  $profiles = @(Get-AiProperty -Object $registry -Name $Tool -Default @())
+  $registry.$Tool = @($profiles + $Profile)
+  Save-AiRegistry -Registry $registry
+  return $Profile
+}
+
+function Remove-AiProfileRegistration {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+
+  $registry = Get-AiRegistry
+  $query = $Name.ToLowerInvariant()
+  $removed = $null
+  $kept = @()
+  foreach ($profile in @(Get-AiProperty -Object $registry -Name $Tool -Default @())) {
+    $matches = $false
+    foreach ($candidate in Get-AiProfileNames -Profile $profile) {
+      if ($candidate.ToLowerInvariant() -eq $query) {
+        $matches = $true
+        break
+      }
+    }
+
+    if ($matches) {
+      $removed = $profile
+    } else {
+      $kept += $profile
+    }
+  }
+
+  if (-not $removed) {
+    throw "$Tool profile '$Name' does not exist."
+  }
+
+  $removedName = Get-AiProfileName -Profile $removed
+  $registry.$Tool = @($kept)
+  Save-AiRegistry -Registry $registry
+
+  if ((Get-AiSavedProfileName -Tool $Tool).ToLowerInvariant() -eq $removedName.ToLowerInvariant()) {
+    Save-AiSelectedProfile -Tool $Tool -Name (Get-AiDefaultProfileName -Tool $Tool)
+  }
+
+  return $removedName
+}
+
+function ConvertFrom-AiManagementArgs {
+  param([string[]]$Arguments)
+
+  $options = @{}
+  $positionals = @()
+  for ($i = 0; $i -lt $Arguments.Count; $i++) {
+    $arg = [string]$Arguments[$i]
+    if ($arg.StartsWith("--")) {
+      $key = $arg.Substring(2)
+      if (-not $key) {
+        continue
+      }
+      if (($i + 1) -lt $Arguments.Count -and -not ([string]$Arguments[$i + 1]).StartsWith("--")) {
+        $options[$key] = [string]$Arguments[$i + 1]
+        $i++
+      } else {
+        $options[$key] = "true"
+      }
+    } else {
+      $positionals += $arg
+    }
+  }
+
+  return [pscustomobject]@{
+    Positionals = $positionals
+    Options = $options
+  }
+}
+
+function Get-AiOption {
+  param(
+    [Parameter(Mandatory = $true)]$Options,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [AllowNull()][string]$Default = $null
+  )
+
+  if ($Options.ContainsKey($Name) -and $Options[$Name]) {
+    return [string]$Options[$Name]
+  }
+
+  return $Default
 }
 
 function Get-AiSavedProfileName {
@@ -779,6 +929,206 @@ function Set-ClaudeProfileEnvironment {
   return $secretSource
 }
 
+function New-CodexProfileConfig {
+  param(
+    [Parameter(Mandatory = $true)]$Profile,
+    [AllowNull()][string]$BaseUrl,
+    [AllowNull()][string]$Model
+  )
+
+  $mode = Get-AiProfileMode -Profile $Profile
+  $profilePath = Get-CodexProfilePath -Profile $Profile
+  if (Test-Path -LiteralPath $profilePath) {
+    return $profilePath
+  }
+
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $profilePath) | Out-Null
+  $runtimeProfile = Get-CodexRuntimeProfileName -Profile $Profile
+  $providerName = $runtimeProfile
+  $displayName = (Get-AiProfileName -Profile $Profile).Replace(":", " ")
+  $modelValue = if ($Model) { $Model } else { "gpt-5.5" }
+
+  if ($mode -eq "api") {
+    $url = if ($BaseUrl) { $BaseUrl } else { "https://your-router.example/v1" }
+    @"
+model_provider = "$providerName"
+model = "$modelValue"
+disable_response_storage = true
+
+[model_providers.$providerName]
+name = "$displayName"
+base_url = "$url"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+"@ | Set-Content -LiteralPath $profilePath -Encoding UTF8
+  } else {
+    @"
+model_provider = "openai"
+model = "$modelValue"
+"@ | Set-Content -LiteralPath $profilePath -Encoding UTF8
+  }
+
+  return $profilePath
+}
+
+function Add-CodexApiProfile {
+  param([string[]]$Arguments)
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  if ($parsed.Positionals.Count -lt 1) {
+    throw "Usage: cx add-api <name> [--base-url URL] [--model MODEL] [--home PATH]"
+  }
+
+  $name = [string]$parsed.Positionals[0]
+  Assert-AiProfileName -Name $name
+  $slug = Get-AiNameSlug -Name $name
+  $profileHome = Get-AiOption -Options $parsed.Options -Name "home" -Default "~/.codex"
+  $runtimeProfile = Get-AiOption -Options $parsed.Options -Name "profile" -Default "api-$($slug.Replace(':', '-'))"
+  $secretId = Get-AiOption -Options $parsed.Options -Name "secret-id" -Default "codex.$name"
+  $baseUrl = Get-AiOption -Options $parsed.Options -Name "base-url" -Default "https://your-router.example/v1"
+  $model = Get-AiOption -Options $parsed.Options -Name "model" -Default "gpt-5.5"
+
+  $profile = [pscustomobject]@{
+    name = $name
+    aliases = @()
+    mode = "api"
+    home = $profileHome
+    codex_profile = $runtimeProfile
+    secret_id = $secretId
+    windows_secret = "~/.ai-secrets/codex-$slug.ps1"
+    linux_secret = "~/.ai-secrets/codex-$slug.env"
+    description = "Codex API profile"
+  }
+  Add-AiProfileRegistration -Tool "codex" -Profile $profile | Out-Null
+  $profilePath = New-CodexProfileConfig -Profile $profile -BaseUrl $baseUrl -Model $model
+  Write-Host "Added Codex API profile '$name'."
+  Write-Host "  Registry: $script:AiRegistryPath"
+  Write-Host "  CODEX_HOME: $(Expand-AiPath $profileHome)"
+  Write-Host "  Config: $profilePath"
+  Write-Host "  Secret: $script:AiSecretsPath [$secretId] with OPENAI_API_KEY"
+}
+
+function Add-CodexSubProfile {
+  param([string[]]$Arguments)
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  if ($parsed.Positionals.Count -lt 1) {
+    throw "Usage: cx add-sub <name> [--home PATH] [--model MODEL]"
+  }
+
+  $name = [string]$parsed.Positionals[0]
+  Assert-AiProfileName -Name $name
+  $slug = Get-AiNameSlug -Name $name
+  $profileHome = Get-AiOption -Options $parsed.Options -Name "home" -Default "~/.codex-$slug"
+  $runtimeProfile = Get-AiOption -Options $parsed.Options -Name "profile" -Default "sub"
+  $model = Get-AiOption -Options $parsed.Options -Name "model" -Default "gpt-5.5"
+
+  $profile = [pscustomobject]@{
+    name = $name
+    aliases = @()
+    mode = "sub"
+    home = $profileHome
+    codex_profile = $runtimeProfile
+    description = "Codex subscription profile"
+  }
+  Add-AiProfileRegistration -Tool "codex" -Profile $profile | Out-Null
+  $profilePath = New-CodexProfileConfig -Profile $profile -Model $model
+  Write-Host "Added Codex subscription profile '$name'."
+  Write-Host "  Registry: $script:AiRegistryPath"
+  Write-Host "  CODEX_HOME: $(Expand-AiPath $profileHome)"
+  Write-Host "  Config: $profilePath"
+  Write-Host "  Login: CODEX_HOME=`"$(Expand-AiPath $profileHome)`" codex login"
+}
+
+function Remove-CodexProfile {
+  param([string[]]$Arguments)
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  if ($parsed.Positionals.Count -lt 1) {
+    throw "Usage: cx remove <name> [--delete-config]"
+  }
+
+  $existing = Get-AiProfileByName -Tool "codex" -Name ([string]$parsed.Positionals[0])
+  if (-not $existing) {
+    throw "codex profile '$($parsed.Positionals[0])' does not exist."
+  }
+  $profilePath = Get-CodexProfilePath -Profile $existing
+  $removed = Remove-AiProfileRegistration -Tool "codex" -Name ([string]$parsed.Positionals[0])
+  if ((Get-AiOption -Options $parsed.Options -Name "delete-config") -eq "true") {
+    Remove-Item -LiteralPath $profilePath -ErrorAction SilentlyContinue
+  }
+
+  Write-Host "Removed Codex profile '$removed'."
+  Write-Host "  Registry: $script:AiRegistryPath"
+  Write-Host "  Config: $(if (Test-Path -LiteralPath $profilePath) { $profilePath } else { '<removed or absent>' })"
+}
+
+function Add-ClaudeApiProfile {
+  param([string[]]$Arguments)
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  if ($parsed.Positionals.Count -lt 1) {
+    throw "Usage: cc add-api <name> [--base-url URL]"
+  }
+
+  $name = [string]$parsed.Positionals[0]
+  Assert-AiProfileName -Name $name
+  $slug = Get-AiNameSlug -Name $name
+  $secretId = Get-AiOption -Options $parsed.Options -Name "secret-id" -Default "claude.$name"
+  $baseUrl = Get-AiOption -Options $parsed.Options -Name "base-url" -Default $script:ClaudeRouterBaseUrl
+
+  $profile = [pscustomobject]@{
+    name = $name
+    aliases = @()
+    mode = "api"
+    base_url = $baseUrl
+    secret_id = $secretId
+    windows_secret = "~/.ai-secrets/claude-$slug.ps1"
+    linux_secret = "~/.ai-secrets/claude-$slug.env"
+    description = "Claude Code API profile"
+  }
+  Add-AiProfileRegistration -Tool "claude" -Profile $profile | Out-Null
+  Write-Host "Added Claude Code API profile '$name'."
+  Write-Host "  Registry: $script:AiRegistryPath"
+  Write-Host "  Base URL: $baseUrl"
+  Write-Host "  Secret: $script:AiSecretsPath [$secretId] with ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
+}
+
+function Add-ClaudeSubProfile {
+  param([string[]]$Arguments)
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  if ($parsed.Positionals.Count -lt 1) {
+    throw "Usage: cc add-sub <name>"
+  }
+
+  $name = [string]$parsed.Positionals[0]
+  Assert-AiProfileName -Name $name
+  $profile = [pscustomobject]@{
+    name = $name
+    aliases = @()
+    mode = "sub"
+    description = "Claude Code subscription profile"
+  }
+  Add-AiProfileRegistration -Tool "claude" -Profile $profile | Out-Null
+  Write-Host "Added Claude Code subscription profile '$name'."
+  Write-Host "  Registry: $script:AiRegistryPath"
+  Write-Host "  Login: claude /login"
+}
+
+function Remove-ClaudeProfile {
+  param([string[]]$Arguments)
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  if ($parsed.Positionals.Count -lt 1) {
+    throw "Usage: cc remove <name>"
+  }
+
+  $removed = Remove-AiProfileRegistration -Tool "claude" -Name ([string]$parsed.Positionals[0])
+  Write-Host "Removed Claude Code profile '$removed'."
+  Write-Host "  Registry: $script:AiRegistryPath"
+}
+
 function Get-CodexBaseUrl {
   param([Parameter(Mandatory = $true)]$Profile)
 
@@ -862,6 +1212,9 @@ Usage:
   cx api:docker      Use a named API profile
   cx list            List registry profiles and local file status
   cx status          Print current saved/process state
+  cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
+  cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
+  cx remove NAME     Remove a Codex profile registration
   cx help            Show this help
 
 Config:
@@ -878,6 +1231,7 @@ Notes:
   Subscription uses codex login cached under the selected CODEX_HOME.
   API mode does not run codex login --with-api-key; it loads OPENAI_API_KEY only for this shell.
   Multiple API profiles can share ~/.codex. Multiple subscription accounts need separate home values.
+  Add commands only write profile metadata and Codex config. Put real tokens in secrets.toml.
   Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
 }
@@ -894,6 +1248,9 @@ Usage:
   cc api:docker      Use a named API profile
   cc list            List registry profiles and local file status
   cc status          Print current saved/process state
+  cc add-api NAME    Register a Claude Code API profile
+  cc add-sub NAME    Register a Claude Code subscription label
+  cc remove NAME     Remove a Claude Code profile registration
   cc help            Show this help
 
 Config:
@@ -907,6 +1264,7 @@ After switching, run Claude Code separately:
 Notes:
   cc does not launch Claude Code. Claude reads the environment variables set in this shell.
   A Claude API profile can define base_url; otherwise https://anyrouter.top is used.
+  Add commands only write profile metadata. Put real tokens in secrets.toml.
   Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
 }
@@ -1039,6 +1397,9 @@ function cx {
       { $_ -in @("help", "-h", "--help", "/?") } { Show-CxHelp; return }
       "list" { Show-CodexList; return }
       "status" { Show-CodexStatus; return }
+      "add-api" { Add-CodexApiProfile -Arguments @($remaining | Select-Object -Skip 1); return }
+      "add-sub" { Add-CodexSubProfile -Arguments @($remaining | Select-Object -Skip 1); return }
+      "remove" { Remove-CodexProfile -Arguments @($remaining | Select-Object -Skip 1); return }
     }
   }
 
@@ -1069,6 +1430,9 @@ function cc {
       { $_ -in @("help", "-h", "--help", "/?") } { Show-CcHelp; return }
       "list" { Show-ClaudeList; return }
       "status" { Show-ClaudeStatus; return }
+      "add-api" { Add-ClaudeApiProfile -Arguments @($remaining | Select-Object -Skip 1); return }
+      "add-sub" { Add-ClaudeSubProfile -Arguments @($remaining | Select-Object -Skip 1); return }
+      "remove" { Remove-ClaudeProfile -Arguments @($remaining | Select-Object -Skip 1); return }
     }
   }
 

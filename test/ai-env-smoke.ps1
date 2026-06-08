@@ -5,27 +5,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$aiEnvDir = Join-Path $HOME ".ai-env"
-$codexDir = Join-Path $HOME ".codex"
+$tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("ai-env-smoke-" + [guid]::NewGuid().ToString("N"))
+$testHome = Join-Path $tmpRoot "home"
+$previousAiEnvHome = $env:AI_ENV_HOME
+$env:AI_ENV_HOME = $testHome
+
+$aiEnvDir = Join-Path $testHome ".ai-env"
+$codexDir = Join-Path $testHome ".codex"
 $profilesPath = Join-Path $aiEnvDir "profiles.json"
 $statePath = Join-Path $aiEnvDir "state.json"
-$secretsDir = Join-Path $HOME ".ai-secrets"
+$secretsDir = Join-Path $testHome ".ai-secrets"
 $secretsPath = Join-Path $secretsDir "secrets.toml"
-$profilesBackup = $null
-$stateBackup = $null
-$secretsBackup = $null
-$hadSecrets = $false
-
-if (Test-Path -LiteralPath $profilesPath) {
-  $profilesBackup = Get-Content -Raw -LiteralPath $profilesPath
-}
-if (Test-Path -LiteralPath $statePath) {
-  $stateBackup = Get-Content -Raw -LiteralPath $statePath
-}
-if (Test-Path -LiteralPath $secretsPath) {
-  $hadSecrets = $true
-  $secretsBackup = Get-Content -Raw -LiteralPath $secretsPath
-}
 
 try {
   New-Item -ItemType Directory -Force -Path $aiEnvDir, $codexDir, $secretsDir | Out-Null
@@ -46,6 +36,18 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-token"
   $cxList = (& { cx list } 6>&1 | Out-String -Width 4096)
   $ccHelp = (& { cc help } 6>&1 | Out-String -Width 4096)
   $ccList = (& { cc list } 6>&1 | Out-String -Width 4096)
+  $cxAddApi = (& { cx add-api api:test --base-url https://router.test/v1 --model gpt-test } 6>&1 | Out-String -Width 4096)
+  $cxAddSub = (& { cx add-sub sub:test } 6>&1 | Out-String -Width 4096)
+  $ccAddApi = (& { cc add-api api:test --base-url https://claude.test } 6>&1 | Out-String -Width 4096)
+  $ccAddSub = (& { cc add-sub sub:test } 6>&1 | Out-String -Width 4096)
+  $cxManagedList = (& { cx list } 6>&1 | Out-String -Width 4096)
+  $ccManagedList = (& { cc list } 6>&1 | Out-String -Width 4096)
+  $codexApiTestConfig = Join-Path $codexDir "api-api-test.config.toml"
+  $codexApiConfigExistsAfterAdd = Test-Path -LiteralPath $codexApiTestConfig
+  $cxRemoveApi = (& { cx remove api:test --delete-config } 6>&1 | Out-String -Width 4096)
+  $cxRemoveSub = (& { cx remove sub:test --delete-config } 6>&1 | Out-String -Width 4096)
+  $ccRemoveApi = (& { cc remove api:test } 6>&1 | Out-String -Width 4096)
+  $ccRemoveSub = (& { cc remove sub:test } 6>&1 | Out-String -Width 4096)
   $cxSwitch = (& { cx api } 6>&1 | Out-String -Width 4096)
   $openAiKey = $env:OPENAI_API_KEY
   $ccSwitch = (& { cc api:docker } 6>&1 | Out-String -Width 4096)
@@ -56,6 +58,22 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-token"
   if ($ccHelp -notmatch "cc - switch Claude Code state") { throw "cc help output missing header" }
   if ($ccList -notmatch "Claude Code profiles") { throw "cc list output missing header" }
   if ($ccList -notmatch "secrets\.toml#claude\.api-docker") { throw "cc list did not report TOML secret source" }
+  if ($cxHelp -notmatch "cx add-api NAME") { throw "cx help output missing add-api" }
+  if ($ccHelp -notmatch "cc add-api NAME") { throw "cc help output missing add-api" }
+  if ($cxAddApi -notmatch "Added Codex API profile 'api:test'") { throw "cx add-api did not report success" }
+  if ($cxAddSub -notmatch "Added Codex subscription profile 'sub:test'") { throw "cx add-sub did not report success" }
+  if ($ccAddApi -notmatch "Added Claude Code API profile 'api:test'") { throw "cc add-api did not report success" }
+  if ($ccAddSub -notmatch "Added Claude Code subscription profile 'sub:test'") { throw "cc add-sub did not report success" }
+  if ($cxManagedList -notmatch "api:test") { throw "cx list did not show added API profile" }
+  if ($cxManagedList -notmatch "sub:test") { throw "cx list did not show added sub profile" }
+  if ($ccManagedList -notmatch "api:test") { throw "cc list did not show added API profile" }
+  if ($ccManagedList -notmatch "sub:test") { throw "cc list did not show added sub profile" }
+  if (-not $codexApiConfigExistsAfterAdd) { throw "cx add-api did not write Codex config" }
+  if ($cxRemoveApi -notmatch "Removed Codex profile 'api:test'") { throw "cx remove api did not report success" }
+  if ($cxRemoveSub -notmatch "Removed Codex profile 'sub:test'") { throw "cx remove sub did not report success" }
+  if ($ccRemoveApi -notmatch "Removed Claude Code profile 'api:test'") { throw "cc remove api did not report success" }
+  if ($ccRemoveSub -notmatch "Removed Claude Code profile 'sub:test'") { throw "cc remove sub did not report success" }
+  if (Test-Path -LiteralPath $codexApiTestConfig) { throw "cx remove --delete-config did not remove Codex config" }
   if ($cxSwitch -notmatch "Secret source: .*secrets\.toml#codex\.api") { throw "cx api did not load TOML secret" }
   if ($openAiKey -ne "sk-test-codex") { throw "cx api did not set OPENAI_API_KEY from TOML" }
   if ($ccSwitch -notmatch "Secret source: .*secrets\.toml#claude\.api-docker") { throw "cc api:docker did not load TOML secret" }
@@ -64,24 +82,10 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-token"
 
   Write-Host "AI env PowerShell smoke check passed."
 } finally {
-  if ($null -ne $profilesBackup) {
-    New-Item -ItemType Directory -Force -Path $aiEnvDir | Out-Null
-    Set-Content -LiteralPath $profilesPath -Value $profilesBackup -Encoding UTF8
+  if ($null -ne $previousAiEnvHome) {
+    $env:AI_ENV_HOME = $previousAiEnvHome
   } else {
-    Remove-Item -LiteralPath $profilesPath -ErrorAction SilentlyContinue
+    Remove-Item Env:AI_ENV_HOME -ErrorAction SilentlyContinue
   }
-
-  if ($null -ne $stateBackup) {
-    New-Item -ItemType Directory -Force -Path $aiEnvDir | Out-Null
-    Set-Content -LiteralPath $statePath -Value $stateBackup -Encoding UTF8
-  } else {
-    Remove-Item -LiteralPath $statePath -ErrorAction SilentlyContinue
-  }
-
-  if ($hadSecrets) {
-    New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
-    Set-Content -LiteralPath $secretsPath -Value $secretsBackup -Encoding UTF8
-  } else {
-    Remove-Item -LiteralPath $secretsPath -ErrorAction SilentlyContinue
-  }
+  Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

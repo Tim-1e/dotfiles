@@ -61,13 +61,45 @@ assert_contains() {
   run_step cx-list cx list
   run_step cc-help cc help
   run_step cc-list cc list
+  run_step cx-add-api cx add-api api:test --base-url https://router.test/v1 --model gpt-test
+  run_step cx-add-sub cx add-sub sub:test
+  run_step cc-add-api cc add-api api:test --base-url https://claude.test
+  run_step cc-add-sub cc add-sub sub:test
+  [ -f "$tmp_home/.codex/api-api-test.config.toml" ] || {
+    echo "cx add-api did not write Codex config" >&2
+    exit 1
+  }
+  run_step cx-managed-list cx list
+  run_step cc-managed-list cc list
+  run_step cx-remove-api cx remove api:test --delete-config
+  run_step cx-remove-sub cx remove sub:test --delete-config
+  run_step cc-remove-api cc remove api:test
+  run_step cc-remove-sub cc remove sub:test
 
   assert_contains "cx - switch Codex state" "$debug_dir/cx-help.out"
+  assert_contains "cx add-api NAME" "$debug_dir/cx-help.out"
   assert_contains "Codex profiles" "$debug_dir/cx-list.out"
   assert_contains "secrets.toml#codex.api" "$debug_dir/cx-list.out"
   assert_contains "cc - switch Claude Code state" "$debug_dir/cc-help.out"
+  assert_contains "cc add-api NAME" "$debug_dir/cc-help.out"
   assert_contains "Claude Code profiles" "$debug_dir/cc-list.out"
   assert_contains "secrets.toml#claude.api-docker" "$debug_dir/cc-list.out"
+  assert_contains "Added Codex API profile 'api:test'" "$debug_dir/cx-add-api.out"
+  assert_contains "Added Codex subscription profile 'sub:test'" "$debug_dir/cx-add-sub.out"
+  assert_contains "Added Claude Code API profile 'api:test'" "$debug_dir/cc-add-api.out"
+  assert_contains "Added Claude Code subscription profile 'sub:test'" "$debug_dir/cc-add-sub.out"
+  assert_contains "api:test" "$debug_dir/cx-managed-list.out"
+  assert_contains "sub:test" "$debug_dir/cx-managed-list.out"
+  assert_contains "api:test" "$debug_dir/cc-managed-list.out"
+  assert_contains "sub:test" "$debug_dir/cc-managed-list.out"
+  assert_contains "Removed Codex profile 'api:test'" "$debug_dir/cx-remove-api.out"
+  assert_contains "Removed Codex profile 'sub:test'" "$debug_dir/cx-remove-sub.out"
+  assert_contains "Removed Claude Code profile 'api:test'" "$debug_dir/cc-remove-api.out"
+  assert_contains "Removed Claude Code profile 'sub:test'" "$debug_dir/cc-remove-sub.out"
+  [ ! -f "$tmp_home/.codex/api-api-test.config.toml" ] || {
+    echo "cx remove --delete-config did not remove Codex config" >&2
+    exit 1
+  }
   if [ "${CODEX_HOME}" != "$tmp_home/.codex" ]; then
     echo "unexpected CODEX_HOME: got '${CODEX_HOME}', expected '$tmp_home/.codex'" >&2
     exit 1

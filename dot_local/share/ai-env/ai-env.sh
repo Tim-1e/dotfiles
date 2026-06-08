@@ -1,18 +1,19 @@
 # AI environment profile functions. Source this file from an interactive shell.
 
-AI_CONFIG_DIR="${HOME}/.ai-env"
+AI_HOME="${AI_ENV_HOME:-$HOME}"
+AI_CONFIG_DIR="${AI_HOME}/.ai-env"
 AI_REGISTRY_PATH="${AI_CONFIG_DIR}/profiles.json"
 AI_STATE_PATH="${AI_CONFIG_DIR}/state.json"
-AI_SECRETS_PATH="${HOME}/.ai-secrets/secrets.toml"
-LEGACY_AI_STATE_DIR="${HOME}/.ai-state"
+AI_SECRETS_PATH="${AI_HOME}/.ai-secrets/secrets.toml"
+LEGACY_AI_STATE_DIR="${AI_HOME}/.ai-state"
 CLAUDE_ROUTER_BASE_URL="https://anyrouter.top"
 
 _ai_expand_path() {
   local input_path="${1:-}"
   case "$input_path" in
     "") return 0 ;;
-    "~") printf '%s\n' "$HOME" ;;
-    "~/"*) printf '%s/%s\n' "$HOME" "${input_path#\~/}" ;;
+    "~") printf '%s\n' "$AI_HOME" ;;
+    "~/"*) printf '%s/%s\n' "$AI_HOME" "${input_path#\~/}" ;;
     *) printf '%s\n' "$input_path" ;;
   esac
 }
@@ -137,6 +138,144 @@ state[tool] = name;
 state.updated_at = new Date().toISOString();
 fs.writeFileSync(path, JSON.stringify(state, null, 2) + "\n");
 ' "$AI_STATE_PATH" "$tool" "$name"
+}
+
+_ai_name_slug() {
+  local slug
+  slug="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^[-_]+//; s/[-_]+$//')"
+  if [ -z "$slug" ]; then
+    echo "profile name '$1' does not contain any usable letters or numbers" >&2
+    return 1
+  fi
+  printf '%s\n' "$slug"
+}
+
+_ai_validate_name() {
+  case "$1" in
+    ""|[^A-Za-z0-9]*|*[!A-Za-z0-9:_-]*)
+      echo "profile name '$1' is not supported. Use letters, numbers, ':', '_' or '-'." >&2
+      return 1
+      ;;
+  esac
+}
+
+_ai_registry_add_profile() {
+  local tool="$1" profile_json="$2"
+  mkdir -p "$AI_CONFIG_DIR"
+  _ai_require_node || return 1
+  node -e '
+const fs = require("fs");
+const path = process.argv[1];
+const tool = process.argv[2];
+const profile = JSON.parse(process.argv[3]);
+const fallback = { schema: 1, defaults: { codex: "sub", claude: "sub" }, codex: [], claude: [] };
+let registry = fallback;
+try {
+  if (fs.existsSync(path)) registry = JSON.parse(fs.readFileSync(path, "utf8"));
+} catch {}
+registry.schema = registry.schema || 1;
+registry.defaults = registry.defaults || { codex: "sub", claude: "sub" };
+registry.codex = Array.isArray(registry.codex) ? registry.codex : [];
+registry.claude = Array.isArray(registry.claude) ? registry.claude : [];
+const query = String(profile.name || "").toLowerCase();
+for (const p of registry[tool] || []) {
+  const names = [p.name, ...(p.aliases || [])].filter(Boolean).map((x) => String(x).toLowerCase());
+  if (names.includes(query)) {
+    console.error(`${tool} profile ${JSON.stringify(profile.name)} already exists. Remove it first, or choose another name.`);
+    process.exit(4);
+  }
+}
+registry[tool].push(profile);
+fs.writeFileSync(path, JSON.stringify(registry, null, 2) + "\n");
+' "$AI_REGISTRY_PATH" "$tool" "$profile_json"
+}
+
+_ai_registry_remove_profile() {
+  local tool="$1" name="$2"
+  _ai_require_node || return 1
+  node -e '
+const fs = require("fs");
+const path = process.argv[1];
+const tool = process.argv[2];
+const query = String(process.argv[3] || "").toLowerCase();
+if (!fs.existsSync(path)) {
+  console.error(`${tool} profile ${JSON.stringify(process.argv[3])} does not exist.`);
+  process.exit(4);
+}
+const registry = JSON.parse(fs.readFileSync(path, "utf8"));
+const profiles = Array.isArray(registry[tool]) ? registry[tool] : [];
+let removed = "";
+registry[tool] = profiles.filter((p) => {
+  const names = [p.name, ...(p.aliases || [])].filter(Boolean).map((x) => String(x).toLowerCase());
+  if (names.includes(query)) {
+    removed = String(p.name || process.argv[3]);
+    return false;
+  }
+  return true;
+});
+if (!removed) {
+  console.error(`${tool} profile ${JSON.stringify(process.argv[3])} does not exist.`);
+  process.exit(4);
+}
+fs.writeFileSync(path, JSON.stringify(registry, null, 2) + "\n");
+process.stdout.write(removed);
+' "$AI_REGISTRY_PATH" "$tool" "$name"
+}
+
+_ai_parse_management_args() {
+  _ai_require_node || return 1
+  node -e '
+const out = { positionals: [], options: {} };
+const args = process.argv.slice(1);
+for (let i = 0; i < args.length; i++) {
+  const arg = String(args[i]);
+  if (arg.startsWith("--")) {
+    const key = arg.slice(2);
+    if (!key) continue;
+    if (i + 1 < args.length && !String(args[i + 1]).startsWith("--")) {
+      out.options[key] = String(args[++i]);
+    } else {
+      out.options[key] = "true";
+    }
+  } else {
+    out.positionals.push(arg);
+  }
+}
+process.stdout.write(JSON.stringify(out));
+' "$@"
+}
+
+_ai_mgmt_value() {
+  local parsed="$1" key="$2" default_value="${3:-}"
+  node -e '
+const parsed = JSON.parse(process.argv[1]);
+const key = process.argv[2];
+const fallback = process.argv[3] || "";
+process.stdout.write(parsed.options && parsed.options[key] ? String(parsed.options[key]) : fallback);
+' "$parsed" "$key" "$default_value"
+}
+
+_ai_mgmt_positional() {
+  local parsed="$1" index="$2"
+  node -e '
+const parsed = JSON.parse(process.argv[1]);
+const index = Number(process.argv[2]);
+process.stdout.write(parsed.positionals && parsed.positionals[index] ? String(parsed.positionals[index]) : "");
+' "$parsed" "$index"
+}
+
+_ai_json_profile() {
+  _ai_require_node || return 1
+  node -e '
+const profile = {};
+for (let i = 1; i < process.argv.length; i += 2) {
+  const key = process.argv[i];
+  const raw = process.argv[i + 1] || "";
+  if (key === "aliases") profile[key] = raw ? raw.split(",").filter(Boolean) : [];
+  else profile[key] = raw;
+}
+process.stdout.write(JSON.stringify(profile));
+' "$@"
 }
 
 _ai_next_profile() {
@@ -479,6 +618,154 @@ _set_claude_env() {
   fi
 }
 
+_cx_write_config_if_missing() {
+  local profile_json="$1" base_url="${2:-}" model="${3:-gpt-5.5}" mode name profile_file provider display_name
+  mode="$(_ai_profile_value "$profile_json" mode sub)"
+  name="$(_ai_profile_value "$profile_json" name "")"
+  profile_file="$(_codex_profile_path "$profile_json")"
+  [ -f "$profile_file" ] && { printf '%s\n' "$profile_file"; return 0; }
+  mkdir -p "$(dirname "$profile_file")"
+  provider="$(_codex_profile_name "$profile_json")"
+  display_name="${name//:/ }"
+
+  if [ "$mode" = "api" ]; then
+    [ -n "$base_url" ] || base_url="https://your-router.example/v1"
+    cat >"$profile_file" <<EOF
+model_provider = "$provider"
+model = "$model"
+disable_response_storage = true
+
+[model_providers.$provider]
+name = "$display_name"
+base_url = "$base_url"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+EOF
+  else
+    cat >"$profile_file" <<EOF
+model_provider = "openai"
+model = "$model"
+EOF
+  fi
+
+  printf '%s\n' "$profile_file"
+}
+
+_cx_add_api() {
+  local parsed name slug home runtime_profile secret_id base_url model profile_json profile_file
+  parsed="$(_ai_parse_management_args "$@")" || return
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  [ -n "$name" ] || { echo "Usage: cx add-api <name> [--base-url URL] [--model MODEL] [--home PATH]" >&2; return 1; }
+  _ai_validate_name "$name" || return
+  slug="$(_ai_name_slug "$name")" || return
+  home="$(_ai_mgmt_value "$parsed" home "~/.codex")"
+  runtime_profile="$(_ai_mgmt_value "$parsed" profile "api-${slug//:/-}")"
+  secret_id="$(_ai_mgmt_value "$parsed" secret-id "codex.$name")"
+  base_url="$(_ai_mgmt_value "$parsed" base-url "https://your-router.example/v1")"
+  model="$(_ai_mgmt_value "$parsed" model "gpt-5.5")"
+  profile_json="$(_ai_json_profile \
+    name "$name" aliases "" mode api home "$home" codex_profile "$runtime_profile" \
+    secret_id "$secret_id" linux_secret "~/.ai-secrets/codex-$slug.env" windows_secret "~/.ai-secrets/codex-$slug.ps1" \
+    description "Codex API profile")"
+  _ai_registry_add_profile codex "$profile_json" || return
+  profile_file="$(_cx_write_config_if_missing "$profile_json" "$base_url" "$model")"
+  echo "Added Codex API profile '$name'."
+  echo "  Registry: $AI_REGISTRY_PATH"
+  echo "  CODEX_HOME: $(_ai_expand_path "$home")"
+  echo "  Config: $profile_file"
+  echo "  Secret: $AI_SECRETS_PATH [$secret_id] with OPENAI_API_KEY"
+}
+
+_cx_add_sub() {
+  local parsed name slug home runtime_profile model profile_json profile_file
+  parsed="$(_ai_parse_management_args "$@")" || return
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  [ -n "$name" ] || { echo "Usage: cx add-sub <name> [--home PATH] [--model MODEL]" >&2; return 1; }
+  _ai_validate_name "$name" || return
+  slug="$(_ai_name_slug "$name")" || return
+  home="$(_ai_mgmt_value "$parsed" home "~/.codex-$slug")"
+  runtime_profile="$(_ai_mgmt_value "$parsed" profile "sub")"
+  model="$(_ai_mgmt_value "$parsed" model "gpt-5.5")"
+  profile_json="$(_ai_json_profile \
+    name "$name" aliases "" mode sub home "$home" codex_profile "$runtime_profile" \
+    description "Codex subscription profile")"
+  _ai_registry_add_profile codex "$profile_json" || return
+  profile_file="$(_cx_write_config_if_missing "$profile_json" "" "$model")"
+  echo "Added Codex subscription profile '$name'."
+  echo "  Registry: $AI_REGISTRY_PATH"
+  echo "  CODEX_HOME: $(_ai_expand_path "$home")"
+  echo "  Config: $profile_file"
+  echo "  Login: CODEX_HOME=\"$(_ai_expand_path "$home")\" codex login"
+}
+
+_cx_remove_profile() {
+  local parsed name removed existing_json profile_file delete_config
+  parsed="$(_ai_parse_management_args "$@")" || return
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  [ -n "$name" ] || { echo "Usage: cx remove <name> [--delete-config]" >&2; return 1; }
+  existing_json="$(_ai_profile_json codex "$name")" || { echo "codex profile '$name' does not exist." >&2; return 1; }
+  profile_file="$(_codex_profile_path "$existing_json")"
+  removed="$(_ai_registry_remove_profile codex "$name")" || return
+  if [ "$(_ai_saved_profile codex)" = "$removed" ]; then
+    _ai_save_profile codex "$(_ai_default_profile codex)" || return
+  fi
+  delete_config="$(_ai_mgmt_value "$parsed" delete-config "")"
+  [ "$delete_config" = "true" ] && rm -f "$profile_file"
+  echo "Removed Codex profile '$removed'."
+  echo "  Registry: $AI_REGISTRY_PATH"
+  if [ -f "$profile_file" ]; then
+    echo "  Config: $profile_file"
+  else
+    echo "  Config: <removed or absent>"
+  fi
+}
+
+_cc_add_api() {
+  local parsed name slug secret_id base_url profile_json
+  parsed="$(_ai_parse_management_args "$@")" || return
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  [ -n "$name" ] || { echo "Usage: cc add-api <name> [--base-url URL]" >&2; return 1; }
+  _ai_validate_name "$name" || return
+  slug="$(_ai_name_slug "$name")" || return
+  secret_id="$(_ai_mgmt_value "$parsed" secret-id "claude.$name")"
+  base_url="$(_ai_mgmt_value "$parsed" base-url "$CLAUDE_ROUTER_BASE_URL")"
+  profile_json="$(_ai_json_profile \
+    name "$name" aliases "" mode api base_url "$base_url" secret_id "$secret_id" \
+    linux_secret "~/.ai-secrets/claude-$slug.env" windows_secret "~/.ai-secrets/claude-$slug.ps1" \
+    description "Claude Code API profile")"
+  _ai_registry_add_profile claude "$profile_json" || return
+  echo "Added Claude Code API profile '$name'."
+  echo "  Registry: $AI_REGISTRY_PATH"
+  echo "  Base URL: $base_url"
+  echo "  Secret: $AI_SECRETS_PATH [$secret_id] with ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
+}
+
+_cc_add_sub() {
+  local parsed name profile_json
+  parsed="$(_ai_parse_management_args "$@")" || return
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  [ -n "$name" ] || { echo "Usage: cc add-sub <name>" >&2; return 1; }
+  _ai_validate_name "$name" || return
+  profile_json="$(_ai_json_profile name "$name" aliases "" mode sub description "Claude Code subscription profile")"
+  _ai_registry_add_profile claude "$profile_json" || return
+  echo "Added Claude Code subscription profile '$name'."
+  echo "  Registry: $AI_REGISTRY_PATH"
+  echo "  Login: claude /login"
+}
+
+_cc_remove_profile() {
+  local parsed name removed
+  parsed="$(_ai_parse_management_args "$@")" || return
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  [ -n "$name" ] || { echo "Usage: cc remove <name>" >&2; return 1; }
+  removed="$(_ai_registry_remove_profile claude "$name")" || return
+  if [ "$(_ai_saved_profile claude)" = "$removed" ]; then
+    _ai_save_profile claude "$(_ai_default_profile claude)" || return
+  fi
+  echo "Removed Claude Code profile '$removed'."
+  echo "  Registry: $AI_REGISTRY_PATH"
+}
+
 _cx_print_status() {
   local profile_json="$1" mode name profile_file base_url
   mode="$(_ai_profile_value "$profile_json" mode sub)"
@@ -612,6 +899,9 @@ Usage:
   cx api:docker      Use a named API profile
   cx list            List registry profiles
   cx status          Print current state
+  cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
+  cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
+  cx remove NAME     Remove a Codex profile registration
   cx help            Show this help
 
 Config:
@@ -620,6 +910,7 @@ Config:
   Secrets:  ~/.ai-secrets/secrets.toml
 
 After switching, run Codex separately: codex
+Add commands only write profile metadata and Codex config. Put real tokens in secrets.toml.
 Legacy ~/.ai-secrets/*.env files are still accepted as a fallback.
 EOF
       return
@@ -640,6 +931,21 @@ EOF
       echo "  OPENAI_API_KEY: $(_ai_secret_preview "${OPENAI_API_KEY:-}")"
       echo "  Cached login: $(_codex_login_status)"
       profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _cx_doctor_summary "$profile_json"
+      return
+      ;;
+    add-api)
+      shift
+      _cx_add_api "$@"
+      return
+      ;;
+    add-sub)
+      shift
+      _cx_add_sub "$@"
+      return
+      ;;
+    remove)
+      shift
+      _cx_remove_profile "$@"
       return
       ;;
   esac
@@ -670,6 +976,9 @@ Usage:
   cc api:docker      Use a named API profile
   cc list            List registry profiles
   cc status          Print current state
+  cc add-api NAME    Register a Claude Code API profile
+  cc add-sub NAME    Register a Claude Code subscription label
+  cc remove NAME     Remove a Claude Code profile registration
   cc help            Show this help
 
 Config:
@@ -678,6 +987,7 @@ Config:
   Secrets:  ~/.ai-secrets/secrets.toml
 
 After switching, run Claude Code separately: claude
+Add commands only write profile metadata. Put real tokens in secrets.toml.
 Legacy ~/.ai-secrets/*.env files are still accepted as a fallback.
 EOF
       return
@@ -697,6 +1007,21 @@ EOF
       echo "  ANTHROPIC_API_KEY: $(_ai_secret_preview "${ANTHROPIC_API_KEY:-}")"
       echo "  ANTHROPIC_AUTH_TOKEN: $(_ai_secret_preview "${ANTHROPIC_AUTH_TOKEN:-}")"
       _cc_external_status
+      return
+      ;;
+    add-api)
+      shift
+      _cc_add_api "$@"
+      return
+      ;;
+    add-sub)
+      shift
+      _cc_add_sub "$@"
+      return
+      ;;
+    remove)
+      shift
+      _cc_remove_profile "$@"
       return
       ;;
   esac

@@ -126,10 +126,14 @@ Claude Code environments without launching either tool:
 cx list
 cx sub
 cx api
+cx add-api api:work --base-url https://router.example/v1
+cx add-sub sub:work
 
 cc list
 cc sub
 cc api
+cc add-api api:work --base-url https://router.example
+cc add-sub sub:work
 ```
 
 On Windows these are loaded from:
@@ -152,6 +156,14 @@ Codex subscription profiles use their own `CODEX_HOME` when multiple ChatGPT
 accounts are needed. Codex API profiles can share the normal `~/.codex` home and
 only load `OPENAI_API_KEY` for the current shell. Claude Code profiles clear or
 set Anthropic environment variables.
+
+Use `cx add-api NAME` / `cc add-api NAME` to register a new API profile without
+putting secrets in git. The commands update `~/.ai-env/profiles.json`; Codex API
+profiles also create `~/.codex/<profile>.config.toml`. Put real tokens in
+`~/.ai-secrets/secrets.toml` under the printed section name. Use
+`cx remove NAME` or `cc remove NAME` to remove a registration. By default, Codex
+API profiles keep `home: ~/.codex` so sessions and history remain shared across
+projects.
 
 Local Codex/Claude settings are conservative: the dotfiles create default
 `~/.codex/*.config.toml`, `~/.claude/settings.json`, and
