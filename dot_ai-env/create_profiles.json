@@ -19,6 +19,7 @@
       "mode": "api",
       "home": "~/.codex",
       "codex_profile": "api",
+      "secret_id": "codex.api",
       "windows_secret": "~/.ai-secrets/codex-api.ps1",
       "linux_secret": "~/.ai-secrets/codex-api.env",
       "description": "Default Codex API router"
@@ -36,6 +37,7 @@
       "aliases": ["router", "claude-api"],
       "mode": "api",
       "base_url": "https://anyrouter.top",
+      "secret_id": "claude.api",
       "windows_secret": "~/.ai-secrets/claude-api.ps1",
       "linux_secret": "~/.ai-secrets/claude-api.env",
       "description": "Default Claude Code API router"
@@ -45,6 +47,7 @@
       "aliases": ["docker", "api-docker"],
       "mode": "api",
       "base_url": "https://anyrouter.top",
+      "secret_id": "claude.api-docker",
       "windows_secret": "~/.ai-secrets/claude-api-docker.ps1",
       "linux_secret": "~/.ai-secrets/claude-api-docker.env",
       "description": "Claude Code API profile copied from I:/Cluade_Desk/claude-config"

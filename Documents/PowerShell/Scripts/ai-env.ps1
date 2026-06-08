@@ -1,6 +1,7 @@
 $script:AiConfigDir = Join-Path $HOME ".ai-env"
 $script:AiRegistryPath = Join-Path $script:AiConfigDir "profiles.json"
 $script:AiStatePath = Join-Path $script:AiConfigDir "state.json"
+$script:AiSecretsPath = Join-Path $HOME ".ai-secrets\secrets.toml"
 $script:LegacyAiStateDir = Join-Path $HOME ".ai-state"
 $script:ClaudeRouterBaseUrl = "https://anyrouter.top"
 
@@ -64,6 +65,7 @@ function New-AiDefaultRegistry {
         mode = "api"
         home = "~/.codex"
         codex_profile = "api"
+        secret_id = "codex.api"
         windows_secret = "~/.ai-secrets/codex-api.ps1"
         linux_secret = "~/.ai-secrets/codex-api.env"
         description = "Default Codex API router"
@@ -81,6 +83,7 @@ function New-AiDefaultRegistry {
         aliases = @("router", "claude-api")
         mode = "api"
         base_url = "https://anyrouter.top"
+        secret_id = "claude.api"
         windows_secret = "~/.ai-secrets/claude-api.ps1"
         linux_secret = "~/.ai-secrets/claude-api.env"
         description = "Default Claude Code API router"
@@ -282,6 +285,20 @@ function Get-AiSecretPath {
   return (Expand-AiPath $path)
 }
 
+function Get-AiSecretId {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile
+  )
+
+  $secretId = Get-AiProperty -Object $Profile -Name "secret_id"
+  if ($secretId) {
+    return [string]$secretId
+  }
+
+  return "$Tool.$(Get-AiProfileName -Profile $Profile)"
+}
+
 function Format-AiSecretPreview {
   param([AllowNull()][string]$Value)
 
@@ -296,6 +313,123 @@ function Format-AiSecretPreview {
   return ($Value.Substring(0, [Math]::Min(8, $Value.Length)) + "..." + $Value.Substring($Value.Length - 4))
 }
 
+function ConvertFrom-AiTomlValue {
+  param([AllowNull()][string]$Value)
+
+  if ($null -eq $Value) {
+    return $null
+  }
+
+  $trimmed = $Value.Trim()
+  if ($trimmed -match '^"((?:\\.|[^"])*)"') {
+    try {
+      return ($Matches[0] | ConvertFrom-Json)
+    } catch {
+      return $Matches[1]
+    }
+  }
+  if ($trimmed -match "^'([^']*)'") {
+    return $Matches[1]
+  }
+  if ($trimmed -match '^(true|false)\b') {
+    return $Matches[1].ToLowerInvariant()
+  }
+
+  return (($trimmed -split '\s+#', 2)[0]).Trim()
+}
+
+function Get-AiTomlSecretSection {
+  param([Parameter(Mandatory = $true)][string]$SecretId)
+
+  $values = @{}
+  if (-not (Test-Path -LiteralPath $script:AiSecretsPath)) {
+    return $values
+  }
+
+  $current = ""
+  foreach ($line in Get-Content -LiteralPath $script:AiSecretsPath) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith("#")) {
+      continue
+    }
+    if ($trimmed -match '^\[([^\]]+)\]\s*$') {
+      $current = $Matches[1].Trim()
+      continue
+    }
+    if ($current -ne $SecretId) {
+      continue
+    }
+    if ($trimmed -match '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$') {
+      $values[$Matches[1]] = ConvertFrom-AiTomlValue $Matches[2]
+    }
+  }
+
+  return $values
+}
+
+function Test-AiTomlSecretValues {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile,
+    [Parameter(Mandatory = $true)][string[]]$Names
+  )
+
+  $section = Get-AiTomlSecretSection -SecretId (Get-AiSecretId -Tool $Tool -Profile $Profile)
+  foreach ($name in $Names) {
+    if ($section.ContainsKey($name) -and $section[$name]) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Set-AiEnvironmentFromTomlSecret {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile,
+    [Parameter(Mandatory = $true)][string[]]$Names
+  )
+
+  $secretId = Get-AiSecretId -Tool $Tool -Profile $Profile
+  $section = Get-AiTomlSecretSection -SecretId $secretId
+  $loaded = $false
+  foreach ($name in $Names) {
+    if ($section.ContainsKey($name) -and $section[$name]) {
+      Set-Item -Path "Env:$name" -Value ([string]$section[$name])
+      $loaded = $true
+    }
+  }
+
+  if ($loaded) {
+    return "$script:AiSecretsPath#$secretId"
+  }
+
+  return $null
+}
+
+function Get-AiSecretDisplay {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile,
+    [Parameter(Mandatory = $true)][string[]]$Names
+  )
+
+  if (Test-AiTomlSecretValues -Tool $Tool -Profile $Profile -Names $Names) {
+    return "$script:AiSecretsPath#$(Get-AiSecretId -Tool $Tool -Profile $Profile)"
+  }
+
+  $legacy = Get-AiSecretPath -Profile $Profile
+  if ($legacy) {
+    if (Test-Path -LiteralPath $legacy) {
+      return $legacy
+    }
+    return "<missing> $legacy"
+  }
+
+  return "<missing> $script:AiSecretsPath#$(Get-AiSecretId -Tool $Tool -Profile $Profile)"
+}
+
 function Get-TomlStringValue {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -306,10 +440,10 @@ function Get-TomlStringValue {
     return $null
   }
 
-  $pattern = "^\s*" + [regex]::Escape($Key) + "\s*=\s*`"([^`"]+)`""
+  $pattern = "^\s*" + [regex]::Escape($Key) + "\s*=\s*(.+)$"
   foreach ($line in Get-Content -LiteralPath $Path) {
     if ($line -match $pattern) {
-      return $Matches[1]
+      return [string](ConvertFrom-AiTomlValue $Matches[1])
     }
   }
 
@@ -395,28 +529,35 @@ function Get-CodexDoctorArgs {
     $args += @("-c", "model_provider=`"$provider`"")
   }
 
-  if ($provider -and $provider -notin @("openai", "ollama", "lmstudio", "amazon-bedrock")) {
+  if ($provider) {
     $baseUrl = Get-TomlStringValue -Path $profilePath -Key "base_url"
     $wireApi = Get-TomlStringValue -Path $profilePath -Key "wire_api"
     $envKey = Get-TomlStringValue -Path $profilePath -Key "env_key"
+    $requiresOpenAiAuth = Get-TomlStringValue -Path $profilePath -Key "requires_openai_auth"
     $providerName = Get-TomlStringValue -Path $profilePath -Key "name"
+    $hasProviderConfig = [bool]($baseUrl -or $wireApi -or $envKey -or $requiresOpenAiAuth -or $providerName)
 
-    if (-not $providerName) {
-      $providerName = $provider
-    }
-    if (-not $wireApi) {
-      $wireApi = "responses"
-    }
+    if (($provider -notin @("openai", "ollama", "lmstudio", "amazon-bedrock")) -or $hasProviderConfig) {
+      if (-not $providerName) {
+        $providerName = $provider
+      }
+      if (-not $wireApi) {
+        $wireApi = "responses"
+      }
 
-    $args += @("-c", "model_providers.$provider.name=`"$providerName`"")
-    if ($baseUrl) {
-      $args += @("-c", "model_providers.$provider.base_url=`"$baseUrl`"")
-    }
-    if ($wireApi) {
-      $args += @("-c", "model_providers.$provider.wire_api=`"$wireApi`"")
-    }
-    if ($envKey) {
-      $args += @("-c", "model_providers.$provider.env_key=`"$envKey`"")
+      $args += @("-c", "model_providers.$provider.name=`"$providerName`"")
+      if ($baseUrl) {
+        $args += @("-c", "model_providers.$provider.base_url=`"$baseUrl`"")
+      }
+      if ($wireApi) {
+        $args += @("-c", "model_providers.$provider.wire_api=`"$wireApi`"")
+      }
+      if ($envKey) {
+        $args += @("-c", "model_providers.$provider.env_key=`"$envKey`"")
+      }
+      if ($requiresOpenAiAuth) {
+        $args += @("-c", "model_providers.$provider.requires_openai_auth=$requiresOpenAiAuth")
+      }
     }
   }
 
@@ -564,9 +705,16 @@ function Set-CodexProfileEnvironment {
   $secretSource = "<none>"
   if ($mode -eq "api") {
     $secret = Get-AiSecretPath -Profile $Profile
-    if ($secret -and (Test-Path -LiteralPath $secret)) {
+    $tomlSource = Set-AiEnvironmentFromTomlSecret -Tool "codex" -Profile $Profile -Names @("OPENAI_API_KEY", "CODEX_API_KEY")
+    if ($tomlSource) {
+      $secretSource = $tomlSource
+    } elseif ($secret -and (Test-Path -LiteralPath $secret)) {
       . $secret
       $secretSource = $secret
+    }
+
+    if (-not $env:OPENAI_API_KEY -and $env:CODEX_API_KEY) {
+      $env:OPENAI_API_KEY = $env:CODEX_API_KEY
     }
 
     if (-not $env:OPENAI_API_KEY -and $name -eq "api") {
@@ -578,7 +726,7 @@ function Set-CodexProfileEnvironment {
     }
 
     if (-not $env:OPENAI_API_KEY) {
-      throw "cx $name needs OPENAI_API_KEY. Put it in $secret."
+      throw "cx $name needs OPENAI_API_KEY. Put it in $script:AiSecretsPath section [$(Get-AiSecretId -Tool 'codex' -Profile $Profile)] or $secret."
     }
   }
 
@@ -598,7 +746,10 @@ function Set-ClaudeProfileEnvironment {
   $secretSource = "<none>"
   if ($mode -eq "api") {
     $secret = Get-AiSecretPath -Profile $Profile
-    if ($secret -and (Test-Path -LiteralPath $secret)) {
+    $tomlSource = Set-AiEnvironmentFromTomlSecret -Tool "claude" -Profile $Profile -Names @("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")
+    if ($tomlSource) {
+      $secretSource = $tomlSource
+    } elseif ($secret -and (Test-Path -LiteralPath $secret)) {
       . $secret
       $secretSource = $secret
     }
@@ -621,7 +772,7 @@ function Set-ClaudeProfileEnvironment {
     }
 
     if (-not $env:ANTHROPIC_API_KEY -and -not $env:ANTHROPIC_AUTH_TOKEN) {
-      throw "cc $name needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in $secret."
+      throw "cc $name needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in $script:AiSecretsPath section [$(Get-AiSecretId -Tool 'claude' -Profile $Profile)] or $secret."
     }
   }
 
@@ -716,7 +867,7 @@ Usage:
 Config:
   Registry: ~/.ai-env/profiles.json
   State:    ~/.ai-env/state.json
-  Secrets:  ~/.ai-secrets/*.ps1
+  Secrets:  ~/.ai-secrets/secrets.toml
 
 After switching, run Codex separately:
   codex
@@ -727,6 +878,7 @@ Notes:
   Subscription uses codex login cached under the selected CODEX_HOME.
   API mode does not run codex login --with-api-key; it loads OPENAI_API_KEY only for this shell.
   Multiple API profiles can share ~/.codex. Multiple subscription accounts need separate home values.
+  Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
 }
 
@@ -747,7 +899,7 @@ Usage:
 Config:
   Registry: ~/.ai-env/profiles.json
   State:    ~/.ai-env/state.json
-  Secrets:  ~/.ai-secrets/*.ps1
+  Secrets:  ~/.ai-secrets/secrets.toml
 
 After switching, run Claude Code separately:
   claude
@@ -755,6 +907,7 @@ After switching, run Claude Code separately:
 Notes:
   cc does not launch Claude Code. Claude reads the environment variables set in this shell.
   A Claude API profile can define base_url; otherwise https://anyrouter.top is used.
+  Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
 }
 
@@ -764,9 +917,13 @@ function Get-CodexProfileRows {
     $mode = Get-AiProfileMode -Profile $profile
     $profileHome = Get-CodexHome -Profile $profile
     $profilePath = Get-CodexProfilePath -Profile $profile
-    $secret = if ($mode -eq "api") { Get-AiSecretPath -Profile $profile } else { "<none>" }
+    $secretOk = if ($mode -eq "api") {
+      (Test-AiTomlSecretValues -Tool "codex" -Profile $profile -Names @("OPENAI_API_KEY", "CODEX_API_KEY")) -or
+        ((Get-AiSecretPath -Profile $profile) -and (Test-Path -LiteralPath (Get-AiSecretPath -Profile $profile)))
+    } else {
+      $true
+    }
     $configOk = Test-Path -LiteralPath $profilePath
-    $secretOk = if ($mode -eq "api") { $secret -and (Test-Path -LiteralPath $secret) } else { $true }
     $ready = if ($mode -eq "api" -and -not $configOk) {
       "missing config"
     } elseif (-not $secretOk) {
@@ -785,7 +942,7 @@ function Get-CodexProfileRows {
       Ready = $ready
       Home = $profileHome
       Config = if (Test-Path -LiteralPath $profilePath) { $profilePath } else { "<missing> $profilePath" }
-      Secret = if ($mode -eq "api") { if ($secret -and (Test-Path -LiteralPath $secret)) { $secret } else { "<missing> $secret" } } else { "<none>" }
+      Secret = if ($mode -eq "api") { Get-AiSecretDisplay -Tool "codex" -Profile $profile -Names @("OPENAI_API_KEY", "CODEX_API_KEY") } else { "<none>" }
       BaseUrl = Get-CodexBaseUrl -Profile $profile
     }
   }
@@ -796,10 +953,19 @@ function Get-ClaudeProfileRows {
   foreach ($profile in Get-AiToolProfiles -Tool "claude") {
     $mode = Get-AiProfileMode -Profile $profile
     $secret = if ($mode -eq "api") { Get-AiSecretPath -Profile $profile } else { "<none>" }
-    $secretOk = if ($mode -eq "api") { $secret -and (Test-Path -LiteralPath $secret) } else { $true }
+    $secretOk = if ($mode -eq "api") {
+      (Test-AiTomlSecretValues -Tool "claude" -Profile $profile -Names @("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")) -or
+        ($secret -and (Test-Path -LiteralPath $secret))
+    } else {
+      $true
+    }
     $name = Get-AiProfileName -Profile $profile
     $baseUrl = if ($mode -eq "api") {
-      if ($secret -and (Test-Path -LiteralPath $secret)) {
+      $secretId = Get-AiSecretId -Tool "claude" -Profile $profile
+      $tomlSection = Get-AiTomlSecretSection -SecretId $secretId
+      if ($tomlSection.ContainsKey("ANTHROPIC_BASE_URL") -and $tomlSection["ANTHROPIC_BASE_URL"]) {
+        $tomlSection["ANTHROPIC_BASE_URL"]
+      } elseif ($secret -and (Test-Path -LiteralPath $secret)) {
         $configured = Get-PowerShellEnvAssignment -Path $secret -Name "ANTHROPIC_BASE_URL"
         if ($configured) { $configured } else { Get-AiProperty -Object $profile -Name "base_url" -Default $script:ClaudeRouterBaseUrl }
       } else {
@@ -814,7 +980,7 @@ function Get-ClaudeProfileRows {
       Name = $name
       Mode = $mode
       Ready = if ($secretOk) { "ok" } else { "missing secret" }
-      Secret = if ($mode -eq "api") { if ($secret -and (Test-Path -LiteralPath $secret)) { $secret } else { "<missing> $secret" } } else { "<none>" }
+      Secret = if ($mode -eq "api") { Get-AiSecretDisplay -Tool "claude" -Profile $profile -Names @("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") } else { "<none>" }
       BaseUrl = $baseUrl
     }
   }

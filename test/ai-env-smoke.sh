@@ -23,9 +23,14 @@ printf '%s\n' \
   '  "codex": "sub",' \
   '  "claude": "api:docker"' \
   '}' >"$tmp_home/.ai-env/state.json"
-printf '%s\n' \
-  'export ANTHROPIC_BASE_URL=https://anyrouter.top' \
-  'export ANTHROPIC_AUTH_TOKEN=sk-test-token' >"$tmp_home/.ai-secrets/claude-api-docker.env"
+cat >"$tmp_home/.ai-secrets/secrets.toml" <<'EOF'
+[codex.api]
+OPENAI_API_KEY = "sk-test-codex"
+
+[claude.api-docker]
+ANTHROPIC_BASE_URL = "https://anyrouter.top"
+ANTHROPIC_AUTH_TOKEN = "sk-test-token"
+EOF
 
 run_step() {
   local name="$1"
@@ -59,8 +64,10 @@ assert_contains() {
 
   assert_contains "cx - switch Codex state" "$debug_dir/cx-help.out"
   assert_contains "Codex profiles" "$debug_dir/cx-list.out"
+  assert_contains "secrets.toml#codex.api" "$debug_dir/cx-list.out"
   assert_contains "cc - switch Claude Code state" "$debug_dir/cc-help.out"
   assert_contains "Claude Code profiles" "$debug_dir/cc-list.out"
+  assert_contains "secrets.toml#claude.api-docker" "$debug_dir/cc-list.out"
   if [ "${CODEX_HOME}" != "$tmp_home/.codex" ]; then
     echo "unexpected CODEX_HOME: got '${CODEX_HOME}', expected '$tmp_home/.codex'" >&2
     exit 1

@@ -17,6 +17,7 @@
       "mode": "api",
       "home": "~/.codex",
       "codex_profile": "api-myrouter",
+      "secret_id": "codex.api-myrouter",
       "windows_secret": "~/.ai-secrets/codex-api-myrouter.ps1",
       "linux_secret": "~/.ai-secrets/codex-api-myrouter.env"
     },
@@ -38,6 +39,7 @@
       "aliases": ["myrouter", "api-myrouter"],
       "mode": "api",
       "base_url": "https://anyrouter.top",
+      "secret_id": "claude.api-myrouter",
       "windows_secret": "~/.ai-secrets/claude-api-myrouter.ps1",
       "linux_secret": "~/.ai-secrets/claude-api-myrouter.env"
     }

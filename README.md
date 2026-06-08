@@ -145,7 +145,7 @@ On Linux they are loaded from:
 ```
 
 Profiles are registered in `~/.ai-env/profiles.json`. Real API keys and router
-tokens stay outside git in `~/.ai-secrets/`. See
+tokens stay outside git in `~/.ai-secrets/secrets.toml`. See
 `secret_examples/README.md` for copy-and-edit examples.
 
 Codex subscription profiles use their own `CODEX_HOME` when multiple ChatGPT

@@ -18,6 +18,61 @@ base URLs, and secret file paths. Real tokens stay in:
 ~/.ai-secrets/
 ```
 
+## Preferred secret file
+
+Use one TOML file for both Windows PowerShell and Linux/zsh:
+
+```text
+~/.ai-secrets/secrets.toml
+```
+
+Start from:
+
+```text
+secret_examples/ai-secrets.toml.example
+```
+
+The section name comes from `secret_id` in `~/.ai-env/profiles.json`.
+
+```toml
+[codex.api]
+OPENAI_API_KEY = "sk-..."
+
+[codex.api-myrouter]
+OPENAI_API_KEY = "sk-..."
+
+[claude.api]
+ANTHROPIC_BASE_URL = "https://anyrouter.top"
+ANTHROPIC_API_KEY = "sk-ant-..."
+```
+
+After editing, check readiness with:
+
+```sh
+cx list
+cc list
+```
+
+On Windows:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$HOME\.ai-secrets"
+Copy-Item .\secret_examples\ai-secrets.toml.example "$HOME\.ai-secrets\secrets.toml"
+```
+
+On Linux:
+
+```sh
+mkdir -p "$HOME/.ai-secrets"
+cp secret_examples/ai-secrets.toml.example "$HOME/.ai-secrets/secrets.toml"
+chmod 600 "$HOME/.ai-secrets/secrets.toml"
+```
+
+## Legacy fallback files
+
+The helper still accepts the old platform-specific secret files. Use these only
+when you cannot use `secrets.toml`.
+
 Windows:
 
 ```powershell
@@ -60,11 +115,10 @@ cp secret_examples/linux/claude-api-name.env.example "$HOME/.ai-secrets/claude-a
 Current default registry:
 
 - `cx sub` -> `~/.codex/sub.config.toml`, ChatGPT subscription login from `codex login`
-- `cx api` -> `~/.codex/api.config.toml` + `~/.ai-secrets/codex-api.*`
-- `cx api:docker` -> `~/.codex/api-docker.config.toml` + `~/.ai-secrets/codex-api-docker.*`
+- `cx api` -> `~/.codex/api.config.toml` + `[codex.api]`
 - `cc sub` -> clears Anthropic API environment and uses local Claude subscription login
-- `cc api` -> `~/.ai-secrets/claude-api.*`
-- `cc api:docker` -> `~/.ai-secrets/claude-api-docker.*`
+- `cc api` -> `[claude.api]`
+- `cc api:docker` -> `[claude.api-docker]`
 
 Multiple Codex API profiles can share the same `home` value, usually
 `~/.codex`, so sessions/history stay together. Multiple Codex subscription

@@ -3,6 +3,7 @@
 AI_CONFIG_DIR="${HOME}/.ai-env"
 AI_REGISTRY_PATH="${AI_CONFIG_DIR}/profiles.json"
 AI_STATE_PATH="${AI_CONFIG_DIR}/state.json"
+AI_SECRETS_PATH="${HOME}/.ai-secrets/secrets.toml"
 LEGACY_AI_STATE_DIR="${HOME}/.ai-state"
 CLAUDE_ROUTER_BASE_URL="https://anyrouter.top"
 
@@ -35,11 +36,11 @@ const fallback = {
   defaults: { codex: "sub", claude: "sub" },
   codex: [
     { name: "sub", aliases: ["subscription", "chatgpt"], mode: "sub", home: "~/.codex", codex_profile: "sub" },
-    { name: "api", aliases: ["router"], mode: "api", home: "~/.codex", codex_profile: "api", linux_secret: "~/.ai-secrets/codex-api.env" }
+    { name: "api", aliases: ["router"], mode: "api", home: "~/.codex", codex_profile: "api", secret_id: "codex.api", linux_secret: "~/.ai-secrets/codex-api.env" }
   ],
   claude: [
     { name: "sub", aliases: ["subscription", "claude-sub"], mode: "sub" },
-    { name: "api", aliases: ["router", "claude-api"], mode: "api", base_url: "https://anyrouter.top", linux_secret: "~/.ai-secrets/claude-api.env" }
+    { name: "api", aliases: ["router", "claude-api"], mode: "api", base_url: "https://anyrouter.top", secret_id: "claude.api", linux_secret: "~/.ai-secrets/claude-api.env" }
   ]
 };
 let registry = fallback;
@@ -167,6 +168,78 @@ _ai_secret_path() {
   _ai_expand_path "$secret_path"
 }
 
+_ai_secret_id() {
+  local tool="$1" profile_json="$2" secret_id name
+  secret_id="$(_ai_profile_value "$profile_json" secret_id "")"
+  if [ -n "$secret_id" ]; then
+    printf '%s\n' "$secret_id"
+  else
+    name="$(_ai_profile_value "$profile_json" name "")"
+    printf '%s.%s\n' "$tool" "$name"
+  fi
+}
+
+_ai_toml_secret_exports() {
+  local secret_id="$1"
+  shift
+  _ai_require_node || return 1
+  [ -f "$AI_SECRETS_PATH" ] || return 1
+  node -e '
+const fs = require("fs");
+const path = process.argv[1];
+const target = process.argv[2];
+const allowed = new Set(process.argv.slice(3));
+const quote = (value) => {
+  const text = String(value);
+  return "'"'"'" + text.replace(/'"'"'/g, "'"'"'\\'"'"''"'"'") + "'"'"'";
+};
+const parseValue = (raw) => {
+  const value = String(raw || "").trim();
+  if (value.startsWith("\"")) {
+    const match = value.match(/^"((?:\\.|[^"])*)"/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch { return match[1]; }
+    }
+  }
+  if (value.startsWith("'"'"'")) {
+    const match = value.match(/^'"'"'([^'"'"']*)'"'"'/);
+    if (match) return match[1];
+  }
+  const bare = value.replace(/\s+#.*$/, "").trim();
+  if (bare === "true" || bare === "false") return bare;
+  return bare;
+};
+let current = "";
+const values = {};
+for (const line of fs.readFileSync(path, "utf8").split(/\r?\n/)) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) continue;
+  const section = trimmed.match(/^\[([^\]]+)\]\s*$/);
+  if (section) {
+    current = section[1].trim();
+    continue;
+  }
+  if (current !== target) continue;
+  const item = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+  if (!item || !allowed.has(item[1])) continue;
+  const parsed = parseValue(item[2]);
+  if (parsed !== "") values[item[1]] = parsed;
+}
+const entries = Object.entries(values);
+if (!entries.length) process.exit(3);
+for (const [key, value] of entries) console.log(`export ${key}=${quote(value)}`);
+' "$AI_SECRETS_PATH" "$secret_id" "$@"
+}
+
+_ai_apply_toml_secret() {
+  local secret_id="$1" exports
+  shift
+  exports="$(_ai_toml_secret_exports "$secret_id" "$@" 2>/dev/null)" || return 1
+  [ -n "$exports" ] || return 1
+  eval "$exports"
+  AI_SECRET_SOURCE="${AI_SECRETS_PATH}#${secret_id}"
+}
+
 _ai_secret_preview() {
   local value="${1:-}" len
   if [ -z "$value" ]; then
@@ -184,7 +257,10 @@ _ai_secret_preview() {
 _ai_toml_value() {
   local file="$1" key="$2"
   [ -f "$file" ] || return 0
-  sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
+  sed -n \
+    -e "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    -e "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\([^#[:space:]]*\).*/\1/p" \
+    "$file" | head -n 1
 }
 
 _codex_profile_name() {
@@ -224,7 +300,7 @@ _codex_login_status() {
 }
 
 _cx_doctor_summary() {
-  local profile_json="$1" profile_file provider model base_url wire_api env_key provider_name json
+  local profile_json="$1" profile_file provider model base_url wire_api env_key requires_openai_auth provider_name json
   local -a args
   command -v codex >/dev/null 2>&1 || return
   command -v node >/dev/null 2>&1 || {
@@ -235,26 +311,33 @@ _cx_doctor_summary() {
   profile_file="$(_codex_profile_path "$profile_json")"
   provider="$(_ai_toml_value "$profile_file" model_provider)"
   model="$(_ai_toml_value "$profile_file" model)"
+  base_url="$(_ai_toml_value "$profile_file" base_url)"
+  wire_api="$(_ai_toml_value "$profile_file" wire_api)"
+  env_key="$(_ai_toml_value "$profile_file" env_key)"
+  requires_openai_auth="$(_ai_toml_value "$profile_file" requires_openai_auth)"
+  provider_name="$(_ai_toml_value "$profile_file" name)"
 
   args=(doctor --json)
   [ -n "$model" ] && args+=(-c "model=\"$model\"")
   [ -n "$provider" ] && args+=(-c "model_provider=\"$provider\"")
 
-  case "$provider" in
-    ""|openai|ollama|lmstudio|amazon-bedrock) ;;
-    *)
-      base_url="$(_ai_toml_value "$profile_file" base_url)"
-      wire_api="$(_ai_toml_value "$profile_file" wire_api)"
-      env_key="$(_ai_toml_value "$profile_file" env_key)"
-      provider_name="$(_ai_toml_value "$profile_file" name)"
+  if [ -n "$provider" ]; then
+    case "$provider" in
+      openai|ollama|lmstudio|amazon-bedrock)
+        [ -z "${base_url}${wire_api}${env_key}${requires_openai_auth}${provider_name}" ] && provider=""
+        ;;
+    esac
+
+    if [ -n "$provider" ]; then
       [ -n "$provider_name" ] || provider_name="$provider"
       [ -n "$wire_api" ] || wire_api="responses"
       args+=(-c "model_providers.$provider.name=\"$provider_name\"")
       [ -n "$base_url" ] && args+=(-c "model_providers.$provider.base_url=\"$base_url\"")
       [ -n "$wire_api" ] && args+=(-c "model_providers.$provider.wire_api=\"$wire_api\"")
       [ -n "$env_key" ] && args+=(-c "model_providers.$provider.env_key=\"$env_key\"")
-      ;;
-  esac
+      [ -n "$requires_openai_auth" ] && args+=(-c "model_providers.$provider.requires_openai_auth=$requires_openai_auth")
+    fi
+  fi
 
   json="$(command codex "${args[@]}" 2>/dev/null)" || {
     echo "  Doctor: unavailable"
@@ -318,7 +401,7 @@ try {
 }
 
 _set_codex_env() {
-  local profile_json="$1" mode name secret legacy legacy_key
+  local profile_json="$1" mode name secret secret_id legacy legacy_key
   mode="$(_ai_profile_value "$profile_json" mode sub)"
   name="$(_ai_profile_value "$profile_json" name "")"
   export CODEX_HOME="$(_codex_home "$profile_json")"
@@ -331,10 +414,17 @@ _set_codex_env() {
   AI_SECRET_SOURCE="<none>"
   if [ "$mode" = "api" ]; then
     secret="$(_ai_secret_path "$profile_json")"
-    if [ -f "$secret" ]; then
+    secret_id="$(_ai_secret_id codex "$profile_json")"
+    if _ai_apply_toml_secret "$secret_id" OPENAI_API_KEY CODEX_API_KEY; then
+      :
+    elif [ -f "$secret" ]; then
       # shellcheck source=/dev/null
       . "$secret"
       AI_SECRET_SOURCE="$secret"
+    fi
+
+    if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${CODEX_API_KEY:-}" ]; then
+      export OPENAI_API_KEY="$CODEX_API_KEY"
     fi
 
     if [ -z "${OPENAI_API_KEY:-}" ] && [ "$name" = "api" ]; then
@@ -351,14 +441,14 @@ _set_codex_env() {
     fi
 
     if [ -z "${OPENAI_API_KEY:-}" ]; then
-      echo "cx $name needs OPENAI_API_KEY. Put it in $secret." >&2
+      echo "cx $name needs OPENAI_API_KEY. Put it in ${AI_SECRETS_PATH} [${secret_id}] or $secret." >&2
       return 1
     fi
   fi
 }
 
 _set_claude_env() {
-  local profile_json="$1" mode name secret base_url
+  local profile_json="$1" mode name secret secret_id base_url
   mode="$(_ai_profile_value "$profile_json" mode sub)"
   name="$(_ai_profile_value "$profile_json" name "")"
   export AI_CLAUDE_LABEL="$name"
@@ -370,7 +460,10 @@ _set_claude_env() {
   AI_SECRET_SOURCE="<none>"
   if [ "$mode" = "api" ]; then
     secret="$(_ai_secret_path "$profile_json")"
-    if [ -f "$secret" ]; then
+    secret_id="$(_ai_secret_id claude "$profile_json")"
+    if _ai_apply_toml_secret "$secret_id" ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL; then
+      :
+    elif [ -f "$secret" ]; then
       # shellcheck source=/dev/null
       . "$secret"
       AI_SECRET_SOURCE="$secret"
@@ -380,7 +473,7 @@ _set_claude_env() {
     [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$base_url"
 
     if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-      echo "cc $name needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in $secret." >&2
+      echo "cc $name needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in ${AI_SECRETS_PATH} [${secret_id}] or $secret." >&2
       return 1
     fi
   fi
@@ -431,52 +524,76 @@ _cc_print_status() {
 }
 
 _ai_list_profiles() {
-  local tool="$1"
+  local tool="$1" output
   _ai_require_node || return 1
+  output="$(node -e '
+const fs = require("fs");
+const path = process.argv[1];
+const tool = process.argv[2];
+const saved = process.argv[3];
+const secretsPath = process.argv[4];
+const home = process.env.HOME;
+const exists = (p) => p && fs.existsSync(p);
+const expand = (p) => !p ? "" : p.replace(/^~(?=\/|$)/, home);
+const parseValue = (raw) => {
+  const value = String(raw || "").trim();
+  if (value.startsWith("\"")) {
+    const match = value.match(/^"((?:\\.|[^"])*)"/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch { return match[1]; }
+    }
+  }
+  if (value.startsWith("'"'"'")) {
+    const match = value.match(/^'"'"'([^'"'"']*)'"'"'/);
+    if (match) return match[1];
+  }
+  return value.replace(/\s+#.*$/, "").trim();
+};
+const parseSecrets = (file) => {
+  const sections = {};
+  if (!fs.existsSync(file)) return sections;
+  let current = "";
+  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const section = trimmed.match(/^\[([^\]]+)\]\s*$/);
+    if (section) {
+      current = section[1].trim();
+      sections[current] = sections[current] || {};
+      continue;
+    }
+    if (!current) continue;
+    const item = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+    if (item) sections[current][item[1]] = parseValue(item[2]);
+  }
+  return sections;
+};
+let registry = JSON.parse(fs.readFileSync(path, "utf8"));
+const secrets = parseSecrets(secretsPath);
+const secretVars = tool === "codex" ? ["OPENAI_API_KEY", "CODEX_API_KEY"] : ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+console.log(["Sel", "Name", "Mode", "Ready", "Runtime", "Secret", "Description"].join("\t"));
+for (const p of registry[tool] || []) {
+  const mode = p.mode || "sub";
+  const runtime = tool === "codex" ? `${expand(p.home || "~/.codex")}/${p.codex_profile || p.profile || String(p.name || "").replace(":", "-")}.config.toml` : (p.base_url || "local subscription");
+  const secretId = p.secret_id || `${tool}.${p.name || ""}`;
+  const tomlReady = mode !== "api" || secretVars.some((name) => secrets[secretId] && secrets[secretId][name]);
+  const legacy = expand(p.linux_secret || p.secret || "");
+  const legacyReady = mode !== "api" || exists(legacy);
+  const secret = mode === "api"
+    ? (tomlReady ? `${secretsPath}#${secretId}` : (legacy ? (legacyReady ? legacy : `<missing> ${legacy}`) : `<missing> ${secretsPath}#${secretId}`))
+    : "<none>";
+  const configOk = tool !== "codex" || exists(runtime);
+  const secretOk = mode !== "api" || tomlReady || legacyReady;
+  const ready = tool === "codex" && mode === "sub" && !configOk ? "ok-default" : (configOk && secretOk ? "ok" : (!configOk ? "missing-config" : "missing-secret"));
+  const selected = String(p.name || "") === saved ? "*" : " ";
+  console.log([selected, p.name || "", mode, ready, runtime, secret || "<missing>", p.description || ""].join("\t"));
+}
+' "$AI_REGISTRY_PATH" "$tool" "$(_ai_saved_profile "$tool")" "$AI_SECRETS_PATH")" || return 1
+
   if command -v column >/dev/null 2>&1; then
-    node -e '
-const fs = require("fs");
-const path = process.argv[1];
-const tool = process.argv[2];
-const saved = process.argv[3];
-const home = process.env.HOME;
-const exists = (p) => p && fs.existsSync(p);
-const expand = (p) => !p ? "" : p.replace(/^~(?=\/|$)/, home);
-let registry = JSON.parse(fs.readFileSync(path, "utf8"));
-console.log(["Sel", "Name", "Mode", "Ready", "Runtime", "Secret", "Description"].join("\t"));
-for (const p of registry[tool] || []) {
-  const mode = p.mode || "sub";
-  const runtime = tool === "codex" ? `${expand(p.home || "~/.codex")}/${p.codex_profile || p.profile || String(p.name || "").replace(":", "-")}.config.toml` : (p.base_url || "local subscription");
-  const secret = mode === "api" ? expand(p.linux_secret || p.secret || "") : "<none>";
-  const configOk = tool !== "codex" || exists(runtime);
-  const secretOk = mode !== "api" || exists(secret);
-  const ready = tool === "codex" && mode === "sub" && !configOk ? "ok-default" : (configOk && secretOk ? "ok" : (!configOk ? "missing-config" : "missing-secret"));
-  const selected = String(p.name || "") === saved ? "*" : " ";
-  console.log([selected, p.name || "", mode, ready, runtime, secret || "<missing>", p.description || ""].join("\t"));
-}
-' "$AI_REGISTRY_PATH" "$tool" "$(_ai_saved_profile "$tool")" | column -t -s "$(printf '\t')"
+    printf '%s\n' "$output" | column -t -s "$(printf '\t')"
   else
-    node -e '
-const fs = require("fs");
-const path = process.argv[1];
-const tool = process.argv[2];
-const saved = process.argv[3];
-const home = process.env.HOME;
-const exists = (p) => p && fs.existsSync(p);
-const expand = (p) => !p ? "" : p.replace(/^~(?=\/|$)/, home);
-let registry = JSON.parse(fs.readFileSync(path, "utf8"));
-console.log(["Sel", "Name", "Mode", "Ready", "Runtime", "Secret", "Description"].join("\t"));
-for (const p of registry[tool] || []) {
-  const mode = p.mode || "sub";
-  const runtime = tool === "codex" ? `${expand(p.home || "~/.codex")}/${p.codex_profile || p.profile || String(p.name || "").replace(":", "-")}.config.toml` : (p.base_url || "local subscription");
-  const secret = mode === "api" ? expand(p.linux_secret || p.secret || "") : "<none>";
-  const configOk = tool !== "codex" || exists(runtime);
-  const secretOk = mode !== "api" || exists(secret);
-  const ready = tool === "codex" && mode === "sub" && !configOk ? "ok-default" : (configOk && secretOk ? "ok" : (!configOk ? "missing-config" : "missing-secret"));
-  const selected = String(p.name || "") === saved ? "*" : " ";
-  console.log([selected, p.name || "", mode, ready, runtime, secret || "<missing>", p.description || ""].join("\t"));
-}
-' "$AI_REGISTRY_PATH" "$tool" "$(_ai_saved_profile "$tool")"
+    printf '%s\n' "$output"
   fi
 }
 
@@ -500,9 +617,10 @@ Usage:
 Config:
   Registry: ~/.ai-env/profiles.json
   State:    ~/.ai-env/state.json
-  Secrets:  ~/.ai-secrets/*.env
+  Secrets:  ~/.ai-secrets/secrets.toml
 
 After switching, run Codex separately: codex
+Legacy ~/.ai-secrets/*.env files are still accepted as a fallback.
 EOF
       return
       ;;
@@ -557,9 +675,10 @@ Usage:
 Config:
   Registry: ~/.ai-env/profiles.json
   State:    ~/.ai-env/state.json
-  Secrets:  ~/.ai-secrets/*.env
+  Secrets:  ~/.ai-secrets/secrets.toml
 
 After switching, run Claude Code separately: claude
+Legacy ~/.ai-secrets/*.env files are still accepted as a fallback.
 EOF
       return
       ;;
