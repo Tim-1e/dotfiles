@@ -48,9 +48,22 @@ case "$(uname -s)" in
     test -f "$FONT_TARGET_DIR/0xProtoNerdFontMono-Regular.ttf" \
       || fail "missing installed Linux font: $FONT_TARGET_DIR/0xProtoNerdFontMono-Regular.ttf"
 
-    if command -v fc-list >/dev/null 2>&1; then
-      fc-list | grep -qi '0xProto Nerd Font Mono' \
-        || fail "fontconfig cannot find 0xProto Nerd Font Mono"
+    if command -v fc-cache >/dev/null 2>&1; then
+      fc-cache -f "$FONT_TARGET_DIR" >/dev/null 2>&1 || true
+    fi
+
+    if command -v fc-scan >/dev/null 2>&1; then
+      FC_SCAN_OUTPUT="$(fc-scan "$FONT_TARGET_DIR"/*.ttf 2>/dev/null || true)"
+      case "$FC_SCAN_OUTPUT" in
+        *"0xProto Nerd Font Mono"*) ;;
+        *) fail "fontconfig cannot scan 0xProto Nerd Font Mono" ;;
+      esac
+    elif command -v fc-list >/dev/null 2>&1; then
+      FC_LIST_OUTPUT="$(fc-list 2>/dev/null || true)"
+      case "$FC_LIST_OUTPUT" in
+        *"0xProto Nerd Font Mono"*) ;;
+        *) fail "fontconfig cannot find 0xProto Nerd Font Mono" ;;
+      esac
     fi
 
     if is_wsl; then

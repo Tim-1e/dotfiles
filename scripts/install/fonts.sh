@@ -82,7 +82,7 @@ install_linux_fonts() {
 
   install_unix_fonts "$source_dir" "$target_dir"
   if command -v fc-cache >/dev/null 2>&1; then
-    fc-cache -f "$font_root" >/dev/null 2>&1 || true
+    fc-cache -f "$target_dir" "$font_root" >/dev/null 2>&1 || true
   fi
 
   if is_wsl; then

@@ -11,7 +11,7 @@ _ai_expand_path() {
   case "$path" in
     "") return 0 ;;
     "~") printf '%s\n' "$HOME" ;;
-    "~/"*) printf '%s/%s\n' "$HOME" "${path#~/}" ;;
+    "~/"*) printf '%s/%s\n' "$HOME" "${path#\~/}" ;;
     *) printf '%s\n' "$path" ;;
   esac
 }
