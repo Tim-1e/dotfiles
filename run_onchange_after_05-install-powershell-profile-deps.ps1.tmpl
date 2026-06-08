@@ -1,6 +1,13 @@
+{{- if eq .chezmoi.os "windows" -}}
 # scripts/install/powershell-profile-deps.ps1 checksum: {{ include "scripts/install/powershell-profile-deps.ps1" | sha256sum }}
 
 $ErrorActionPreference = "Continue"
+
+$isWindowsHost = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { $IsWindows } else { $env:OS -eq "Windows_NT" }
+if (-not $isWindowsHost) {
+  Write-Host "Skipping PowerShell profile dependency install on non-Windows host."
+  exit 0
+}
 
 $sourceRoot = '{{ .chezmoi.sourceDir }}'
 $scriptPath = Join-Path $sourceRoot 'scripts\install\powershell-profile-deps.ps1'
@@ -8,3 +15,4 @@ $scriptPath = Join-Path $sourceRoot 'scripts\install\powershell-profile-deps.ps1
 if (Test-Path -LiteralPath $scriptPath) {
   & $scriptPath
 }
+{{- end -}}

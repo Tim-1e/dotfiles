@@ -1,3 +1,4 @@
+{{- if eq .chezmoi.os "windows" -}}
 # scripts/install/fonts-windows.ps1 checksum: {{ include "scripts/install/fonts-windows.ps1" | sha256sum }}
 # 0xProto/0xProtoNerdFont-Bold.ttf checksum: {{ include "0xProto/0xProtoNerdFont-Bold.ttf" | sha256sum }}
 # 0xProto/0xProtoNerdFont-Italic.ttf checksum: {{ include "0xProto/0xProtoNerdFont-Italic.ttf" | sha256sum }}
@@ -14,8 +15,15 @@
 
 $ErrorActionPreference = "Stop"
 
+$isWindowsHost = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { $IsWindows } else { $env:OS -eq "Windows_NT" }
+if (-not $isWindowsHost) {
+  Write-Host "Skipping Windows font install on non-Windows host."
+  exit 0
+}
+
 $sourceRoot = '{{ .chezmoi.sourceDir }}'
 $scriptPath = Join-Path $sourceRoot 'scripts\install\fonts-windows.ps1'
 $fontSource = Join-Path $sourceRoot '0xProto'
 
 & $scriptPath -SourceDir $fontSource
+{{- end -}}

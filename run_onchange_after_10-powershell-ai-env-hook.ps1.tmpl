@@ -1,6 +1,13 @@
+{{- if eq .chezmoi.os "windows" -}}
 # Documents/PowerShell/Scripts/ai-env.ps1 checksum: {{ include "Documents/PowerShell/Scripts/ai-env.ps1" | sha256sum }}
 
 $ErrorActionPreference = "Stop"
+
+$isWindowsHost = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { $IsWindows } else { $env:OS -eq "Windows_NT" }
+if (-not $isWindowsHost) {
+  Write-Host "Skipping PowerShell ai-env profile hook on non-Windows host."
+  exit 0
+}
 
 $profilePath = $PROFILE.CurrentUserCurrentHost
 $profileDir = Split-Path -Parent $profilePath
@@ -35,3 +42,4 @@ if ($content.Contains($begin)) {
 }
 
 Set-Content -LiteralPath $profilePath -Value ($content.TrimEnd() + [Environment]::NewLine) -Encoding UTF8
+{{- end -}}

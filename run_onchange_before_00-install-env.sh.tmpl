@@ -1,3 +1,4 @@
+{{- if ne .chezmoi.os "windows" -}}
 {{ if eq .chezmoi.os "android" -}}
 #!{{ env "PREFIX" }}/bin/bash
 {{- else -}}
@@ -30,3 +31,4 @@ set -euo pipefail
 # 0xProto/0xProtoNerdFontPropo-Regular.ttf checksum: {{ include "0xProto/0xProtoNerdFontPropo-Regular.ttf" | sha256sum }}
 
 DOTFILES_SOURCE_DIR="{{ .chezmoi.sourceDir }}" bash "{{ .chezmoi.sourceDir }}/scripts/install.sh"
+{{- end -}}

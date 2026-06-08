@@ -111,7 +111,7 @@ try {
       return
     fi
   fi
-  value="$(_ai_legacy_saved_profile "$tool")"
+  value="$(_ai_legacy_saved_profile "$tool" || true)"
   if [ -n "$value" ]; then
     printf '%s\n' "$value"
   else
