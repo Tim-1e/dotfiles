@@ -28,7 +28,11 @@ jobs:
             scripts/install/fonts.sh \
             test/smoke.sh \
             test/fonts-smoke.sh \
+            test/ai-env-smoke.sh \
             test/termux-platform-smoke.sh
+
+      - name: Test AI env shell helpers
+        run: ./test/ai-env-smoke.sh
 
       - name: Test font install
         run: |
@@ -78,12 +82,16 @@ jobs:
             scripts/install/fastfetch.sh \
             scripts/install/fonts.sh \
             test/smoke.sh \
-            test/fonts-smoke.sh
+            test/fonts-smoke.sh \
+            test/ai-env-smoke.sh
 
       - name: Test font install
         run: |
           ./scripts/install/fonts.sh
           ./test/fonts-smoke.sh
+
+      - name: Test AI env shell helpers
+        run: ./test/ai-env-smoke.sh
 
   windows:
     name: Windows
@@ -100,11 +108,18 @@ jobs:
           $tokens = $null
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/fonts-windows.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/powershell-profile-deps.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("Documents/PowerShell/Scripts/ai-env.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/fonts-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("test/ai-env-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) {
             $errors | Format-List
             exit 1
           }
+
+      - name: Test AI env PowerShell helpers
+        run: ./test/ai-env-smoke.ps1 -SourceDir "$PWD"
 
       - name: Test font install
         run: |

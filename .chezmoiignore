@@ -1,9 +1,25 @@
 /README.md
 /bootstrap.sh
+/bootstrap.ps1
 /scripts/**
 /test/**
 /0xProto/**
+/secret_examples/**
 /.github/**
 /.git/**
 /.gitignore
 /.gitattributes
+
+{{ if eq .chezmoi.os "windows" }}
+/dot_zshrc
+/dot_tmux.conf
+/dot_config/**
+/dot_local/**
+/run_onchange_before_00-install-env.sh.tmpl
+/run_after_99-smoke-test.sh.tmpl
+{{ else }}
+/Documents/**
+/run_onchange_after_00-install-windows-fonts.ps1.tmpl
+/run_onchange_after_05-install-powershell-profile-deps.ps1.tmpl
+/run_onchange_after_10-powershell-ai-env-hook.ps1.tmpl
+{{ end }}

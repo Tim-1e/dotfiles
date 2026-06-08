@@ -55,6 +55,7 @@ else
 fi
 
 bash "$SOURCE_DIR/test/fonts-smoke.sh"
+bash "$SOURCE_DIR/test/ai-env-smoke.sh"
 
 FASTFETCH_OK=0
 if command -v fastfetch >/dev/null 2>&1 && fastfetch --version >/dev/null 2>&1; then

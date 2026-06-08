@@ -60,6 +60,10 @@ export FZF_DEFAULT_OPTS='--height=40% --layout=reverse --border'
 export FZF_CTRL_T_OPTS="--preview 'batcat --color=always {} 2>/dev/null || bat --color=always {} 2>/dev/null || command cat {}'"
 export FZF_ALT_C_OPTS="--preview 'eza --tree --level=2 --icons {} 2>/dev/null || ls -la {}'"
 
+if [ -f "$HOME/.local/share/ai-env/ai-env.sh" ]; then
+  source "$HOME/.local/share/ai-env/ai-env.sh"
+fi
+
 zd() {
   local dir
   dir=$(zoxide query -l 2>/dev/null | fzf --preview 'eza --tree --level=2 --icons {} 2>/dev/null || ls -la {}')

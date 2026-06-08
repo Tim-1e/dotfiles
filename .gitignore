@@ -2,3 +2,7 @@
 /.chezmoitemplates
 *.tmp
 *.log
+/.ai-secrets/
+/secrets/
+*.secret
+*.secret.*

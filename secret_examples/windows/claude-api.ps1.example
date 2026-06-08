@@ -1,0 +1,6 @@
+$env:ANTHROPIC_AUTH_TOKEN = "your-router-token"
+$env:ANTHROPIC_BASE_URL = "https://anyrouter.top"
+
+# If your router expects x-api-key style auth instead, use this and remove
+# ANTHROPIC_AUTH_TOKEN.
+# $env:ANTHROPIC_API_KEY = "your-router-key"

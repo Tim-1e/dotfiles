@@ -1,0 +1,31 @@
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+file_opener = "cursor"
+
+[tui]
+status_line = ["model-with-reasoning", "current-dir", "project-name", "run-state", "context-used", "five-hour-limit", "weekly-limit", "used-tokens", "total-input-tokens", "total-output-tokens", "task-progress"]
+status_line_use_colors = true
+session_picker_view = "dense"
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+
+[features]
+memories = true
+
+[notice]
+fast_default_opt_out = true
+hide_rate_limit_model_nudge = true
+
+{{ if eq .chezmoi.os "windows" -}}
+[windows]
+sandbox = "elevated"
+{{ end -}}
+
+[mcp_servers.figma]
+url = "https://mcp.figma.com/mcp"
+
+[plugins."figma@openai-curated"]
+enabled = true

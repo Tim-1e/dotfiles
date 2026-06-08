@@ -1,0 +1,10 @@
+# scripts/install/powershell-profile-deps.ps1 checksum: {{ include "scripts/install/powershell-profile-deps.ps1" | sha256sum }}
+
+$ErrorActionPreference = "Continue"
+
+$sourceRoot = '{{ .chezmoi.sourceDir }}'
+$scriptPath = Join-Path $sourceRoot 'scripts\install\powershell-profile-deps.ps1'
+
+if (Test-Path -LiteralPath $scriptPath) {
+  & $scriptPath
+}
