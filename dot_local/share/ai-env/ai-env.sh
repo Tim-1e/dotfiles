@@ -7,12 +7,12 @@ LEGACY_AI_STATE_DIR="${HOME}/.ai-state"
 CLAUDE_ROUTER_BASE_URL="https://anyrouter.top"
 
 _ai_expand_path() {
-  local path="${1:-}"
-  case "$path" in
+  local input_path="${1:-}"
+  case "$input_path" in
     "") return 0 ;;
     "~") printf '%s\n' "$HOME" ;;
-    "~/"*) printf '%s/%s\n' "$HOME" "${path#\~/}" ;;
-    *) printf '%s\n' "$path" ;;
+    "~/"*) printf '%s/%s\n' "$HOME" "${input_path#\~/}" ;;
+    *) printf '%s\n' "$input_path" ;;
   esac
 }
 
@@ -161,10 +161,10 @@ else process.stdout.write(String((registry.defaults && registry.defaults[tool]) 
 }
 
 _ai_secret_path() {
-  local profile_json="$1" path
-  path="$(_ai_profile_value "$profile_json" linux_secret "")"
-  [ -n "$path" ] || path="$(_ai_profile_value "$profile_json" secret "")"
-  _ai_expand_path "$path"
+  local profile_json="$1" secret_path
+  secret_path="$(_ai_profile_value "$profile_json" linux_secret "")"
+  [ -n "$secret_path" ] || secret_path="$(_ai_profile_value "$profile_json" secret "")"
+  _ai_expand_path "$secret_path"
 }
 
 _ai_secret_preview() {
@@ -184,7 +184,7 @@ _ai_secret_preview() {
 _ai_toml_value() {
   local file="$1" key="$2"
   [ -f "$file" ] || return 0
-  sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
+  sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
 }
 
 _codex_profile_name() {
