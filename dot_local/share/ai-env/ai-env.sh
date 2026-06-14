@@ -1508,10 +1508,10 @@ _ai_health_cached() {
 }
 
 _ai_health_cell() {
-  local result="$1" status code
+  local result="$1" hstatus code
   [ -n "$result" ] || { printf '?'; return; }
-  status="$(_ai_health_field "$result" status)"
-  case "$status" in
+  hstatus="$(_ai_health_field "$result" status)"
+  case "$hstatus" in
     healthy) printf '🟢%sms' "$(_ai_health_field "$result" latencyMs)";;
     degraded) code="$(printf '%s' "$(_ai_health_field "$result" error)" | grep -oE 'HTTP [0-9]{3}' | head -1 | grep -oE '[0-9]{3}')"; printf '🟡%s' "${code:-slow}";;
     down) code="$(printf '%s' "$(_ai_health_field "$result" error)" | grep -oE 'HTTP [0-9]{3}' | head -1 | grep -oE '[0-9]{3}')"; printf '🔴%s' "${code:-err}";;
