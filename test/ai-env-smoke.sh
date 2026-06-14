@@ -200,6 +200,7 @@ if command -v zsh >/dev/null 2>&1; then
     command -v node >/dev/null
     toml_base_url="$(_ai_toml_value "$HOME/.codex/api.config.toml" base_url)"
     [ "$toml_base_url" = "https://api.aixhan.com/v1" ]
+    _ai_probe_health() { printf "{\"status\":\"skip\",\"latencyMs\":0,\"method\":null,\"error\":\"mock\"}"; }
     cx list
     cc status
   '
