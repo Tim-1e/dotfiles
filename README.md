@@ -135,6 +135,15 @@ cc sub
 cc api
 cc add-api api:work --base-url https://router.example
 cc add-sub sub:work
+
+cc health                 # probe profiles (🟢🟡🔴), cached 5min; --fresh to re-probe
+cc                        # no arg: auto-select a healthy profile (skips 🔴 down)
+cc default api:work       # set the primary profile
+cc probe-model api glm-4.6  # per-profile probe model
+
+mcp list                  # MCP servers + which tool has each
+mcp sync                  # push ~/.ai-env/mcp.toml -> Claude & Codex
+mcp pull                  # import existing MCP servers into mcp.toml
 ```
 
 On Windows these are loaded from:
@@ -170,6 +179,53 @@ projects.
 JSONL files under `CODEX_HOME/sessions`. It reports total, input, cached input,
 output, and reasoning token counts with a small text bar chart. It does not call
 network APIs and does not estimate cost.
+
+### Health checks and auto-failover
+
+`cc health` / `cx health` probe each API profile by making a real, minimal
+request to its actual wire endpoint (Claude `/v1/messages`; Codex `/responses`
+then `/chat/completions`) and validating that a generation actually comes back —
+not just that the endpoint is reachable. Results are classified as 🟢 healthy,
+🟡 degraded (slow, or transient 429/5xx), 🔴 down (401/404/timeout), or ⏭ skip
+(subscription profiles, which can't be probed remotely).
+
+- Results are cached in `~/.ai-env/health.json` for 5 minutes; pass `--fresh` to
+  re-probe. There is **no background daemon** — probes only run on `health`,
+  `list`, `status`, or switch.
+- `cc list` / `cx list` show a `Health` column read **from cache only** (no
+  network); a stale or never-probed entry shows ⏭ as a hint to run `cc health`.
+- Running `cc` / `cx` with no argument **auto-selects** the first non-down
+  profile (default first), so a dead router is skipped automatically. `cc next`
+  keeps the old cycle-to-next behavior.
+- Relays serve different model sets, so the probe model is per-profile:
+  `cc probe-model NAME MODEL` (default Claude `claude-3-5-haiku`, Codex
+  `gpt-5.4-mini`); `cc default NAME` sets the primary; `cc health-clear` clears
+  the cache. The probe uses Node's built-in HTTPS (no `curl` dependency).
+
+### MCP servers
+
+`mcp` manages MCP servers for both Claude Code and Codex from a single source of
+truth, `~/.ai-env/mcp.toml`:
+
+```sh
+mcp edit                  # open mcp.toml in $EDITOR (creates a starter if absent)
+mcp list                  # servers + whether each target currently has them
+mcp sync                  # push mcp.toml -> Claude & Codex (idempotent)
+mcp pull [NAME]           # import existing servers from the targets into mcp.toml
+mcp get NAME              # show one server's config + target status
+```
+
+Each `[mcp.NAME]` block is either stdio (`command = [...]`) or http
+(`url = "..."`), with optional `env = { ... }`, `sync = ["claude", "codex"]`
+(omit = both), and `enabled = false` to keep a server defined but skipped.
+`mcp sync` writes globally — Claude `~/.claude.json` `mcpServers` (atomic JSON
+merge that preserves your other keys, with a `.aienv.bak` backup) and Codex
+`~/.codex/config.toml` `[mcp_servers.NAME]` (surgical block edit that preserves
+model/providers and any servers you manage by hand). Disabled or unsynced
+servers are removed from Claude and written with `enabled = false` on Codex.
+`mcp.toml` is machine-local (not synced via chezmoi); copy
+`secret_examples/mcp.toml.example` to start. Codex's official `@openai-curated`
+connectors are managed by Codex itself and are intentionally out of scope.
 
 Local Codex/Claude settings are conservative: the dotfiles create default
 `~/.codex/*.config.toml`, `~/.claude/settings.json`, and
