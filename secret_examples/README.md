@@ -68,6 +68,62 @@ cp secret_examples/ai-secrets.toml.example "$HOME/.ai-secrets/secrets.toml"
 chmod 600 "$HOME/.ai-secrets/secrets.toml"
 ```
 
+## Per-profile env vars (non-secret)
+
+A profile entry in `~/.ai-env/profiles.json` may carry an optional `env` object for
+**non-secret** variables that should travel with the profile — e.g. GLM model mapping and
+the auto-compact window:
+
+```json
+{
+  "name": "glm",
+  "mode": "api",
+  "base_url": "https://open.bigmodel.cn/api/anthropic",
+  "secret_id": "claude.glm",
+  "env": {
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
+  }
+}
+```
+
+These are exported when you switch to the profile (`cc glm` / `cx glm`) and cleared when you
+switch to another profile, so values never leak between routers. Author them with the
+repeatable `--env KEY=VALUE` flag:
+
+```sh
+cc add-api glm --base-url https://open.bigmodel.cn/api/anthropic \
+  --env ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2[1m] \
+  --env CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000
+```
+
+Because this is the registry (not `secrets.toml`), it is safe to sync. Keep real tokens out of it.
+
+## Interactive add and secret scaffolding
+
+In a terminal, `cc add-api` / `cx add-api` (and `cx add-sub`) prompt for any missing
+`--base-url`, `--env-key`, and `--provider-name`, then prompt for the API key/token (hidden)
+and write the missing `[tool.name]` section into `~/.ai-secrets/secrets.toml`. In a
+non-interactive shell (CI, piped stdin, or `AI_ENV_NONINTERACTIVE=1`) it skips all prompts and
+uses defaults, so scripts and tests never block.
+
+The generated Codex config (`~/.codex/<runtime>.config.toml`) uses a unified provider id:
+
+```toml
+model_provider = "api-router"
+disable_response_storage = true
+
+[model_providers.api-router]
+name = "<provider-name>"
+base_url = "<base-url>"
+env_key = "OPENAI_API_KEY"
+```
+
+Only `name` and `base_url` change per profile; pass `--env-key` to use a different secret
+variable, or `--model` to pin a model line.
+
 ## Legacy fallback files
 
 The helper still accepts the old platform-specific secret files. Use these only

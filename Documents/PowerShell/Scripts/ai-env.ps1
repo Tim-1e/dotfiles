@@ -664,19 +664,23 @@ function Get-CodexLoginStatusText {
   }
 }
 
-function Get-CodexDoctorArgs {
+function Get-CodexProviderConfigArgs {
   param([Parameter(Mandatory = $true)]$Profile)
 
-  $args = @("doctor", "--json")
+  $configArgs = @()
   $profilePath = Get-CodexProfilePath -Profile $Profile
   $model = Get-TomlStringValue -Path $profilePath -Key "model"
   $provider = Get-TomlStringValue -Path $profilePath -Key "model_provider"
+  $reasoning = Get-TomlStringValue -Path $profilePath -Key "model_reasoning_effort"
 
   if ($model) {
-    $args += @("-c", "model=`"$model`"")
+    $configArgs += @("-c", "model=`"$model`"")
   }
   if ($provider) {
-    $args += @("-c", "model_provider=`"$provider`"")
+    $configArgs += @("-c", "model_provider=`"$provider`"")
+  }
+  if ($reasoning) {
+    $configArgs += @("-c", "model_reasoning_effort=`"$reasoning`"")
   }
 
   if ($provider) {
@@ -695,23 +699,29 @@ function Get-CodexDoctorArgs {
         $wireApi = "responses"
       }
 
-      $args += @("-c", "model_providers.$provider.name=`"$providerName`"")
+      $configArgs += @("-c", "model_providers.$provider.name=`"$providerName`"")
       if ($baseUrl) {
-        $args += @("-c", "model_providers.$provider.base_url=`"$baseUrl`"")
+        $configArgs += @("-c", "model_providers.$provider.base_url=`"$baseUrl`"")
       }
       if ($wireApi) {
-        $args += @("-c", "model_providers.$provider.wire_api=`"$wireApi`"")
+        $configArgs += @("-c", "model_providers.$provider.wire_api=`"$wireApi`"")
       }
       if ($envKey) {
-        $args += @("-c", "model_providers.$provider.env_key=`"$envKey`"")
+        $configArgs += @("-c", "model_providers.$provider.env_key=`"$envKey`"")
       }
       if ($requiresOpenAiAuth) {
-        $args += @("-c", "model_providers.$provider.requires_openai_auth=$requiresOpenAiAuth")
+        $configArgs += @("-c", "model_providers.$provider.requires_openai_auth=$requiresOpenAiAuth")
       }
     }
   }
 
-  return $args
+  return $configArgs
+}
+
+function Get-CodexDoctorArgs {
+  param([Parameter(Mandatory = $true)]$Profile)
+
+  return @("doctor", "--json") + (Get-CodexProviderConfigArgs -Profile $Profile)
 }
 
 function Get-CodexDoctorReport {
@@ -840,6 +850,177 @@ function Get-LegacyCodexApiKey {
   return $null
 }
 
+function Get-AiToolEnvKeys {
+  param([Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool)
+
+  $keys = [System.Collections.Generic.HashSet[string]]::new()
+  foreach ($profile in Get-AiToolProfiles -Tool $Tool) {
+    $envObj = Get-AiProperty -Object $profile -Name "env"
+    if ($envObj) {
+      foreach ($prop in $envObj.PSObject.Properties) {
+        [void]$keys.Add($prop.Name)
+      }
+    }
+  }
+
+  return $keys
+}
+
+function Clear-AiToolExtraEnv {
+  param([Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool)
+
+  foreach ($key in (Get-AiToolEnvKeys -Tool $Tool)) {
+    Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+  }
+}
+
+function Set-AiProfileExtraEnv {
+  param([Parameter(Mandatory = $true)]$Profile)
+
+  $envObj = Get-AiProperty -Object $Profile -Name "env"
+  if (-not $envObj) {
+    return
+  }
+
+  foreach ($prop in $envObj.PSObject.Properties) {
+    Set-Item -Path "Env:$($prop.Name)" -Value ([string]$prop.Value)
+  }
+}
+
+function Get-AiProfileEnvSummary {
+  param([Parameter(Mandatory = $true)]$Profile)
+
+  $envObj = Get-AiProperty -Object $Profile -Name "env"
+  if (-not $envObj) {
+    return "<none>"
+  }
+
+  return [string]@($envObj.PSObject.Properties).Count
+}
+
+function Split-AiEnvArguments {
+  param([string[]]$Arguments)
+
+  $envMap = [ordered]@{}
+  $rest = @()
+  for ($i = 0; $i -lt $Arguments.Count; $i++) {
+    $arg = [string]$Arguments[$i]
+    if (($arg -eq "--env" -or $arg -eq "--set-env") -and ($i + 1) -lt $Arguments.Count) {
+      $pair = [string]$Arguments[$i + 1]
+      $i++
+      $idx = $pair.IndexOf("=")
+      if ($idx -lt 1) {
+        throw "Invalid --env value '$pair'. Expected KEY=VALUE."
+      }
+      $envMap[$pair.Substring(0, $idx)] = $pair.Substring($idx + 1)
+    } else {
+      $rest += $arg
+    }
+  }
+
+  return [pscustomobject]@{ Env = $envMap; Rest = @($rest) }
+}
+
+function Test-AiInteractive {
+  if ($env:AI_ENV_NONINTERACTIVE) {
+    return $false
+  }
+  try {
+    if ([Console]::IsInputRedirected) {
+      return $false
+    }
+  } catch {
+    return $false
+  }
+  return $true
+}
+
+function Read-AiInput {
+  param(
+    [Parameter(Mandatory = $true)][string]$Prompt,
+    [string]$Default = ""
+  )
+
+  $label = if ($Default) { "$Prompt [$Default]" } else { $Prompt }
+  $answer = Read-Host -Prompt $label
+  if ([string]::IsNullOrWhiteSpace($answer)) {
+    return $Default
+  }
+  return $answer.Trim()
+}
+
+function Read-AiSecretInput {
+  param([Parameter(Mandatory = $true)][string]$Prompt)
+
+  $secure = Read-Host -Prompt $Prompt -AsSecureString
+  if (-not $secure -or $secure.Length -eq 0) {
+    return ""
+  }
+  $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+  try {
+    return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+  } finally {
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+  }
+}
+
+function Add-AiTomlSecretValue {
+  param(
+    [Parameter(Mandatory = $true)][string]$SecretId,
+    [Parameter(Mandatory = $true)][string]$Key,
+    [Parameter(Mandatory = $true)][string]$Value
+  )
+
+  $sectionExists = $false
+  if (Test-Path -LiteralPath $script:AiSecretsPath) {
+    foreach ($line in Get-Content -LiteralPath $script:AiSecretsPath) {
+      if ($line.Trim() -eq "[$SecretId]") {
+        $sectionExists = $true
+        break
+      }
+    }
+  }
+  if ($sectionExists) {
+    return $false
+  }
+
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:AiSecretsPath) | Out-Null
+  $escaped = $Value.Replace('\', '\\').Replace('"', '\"')
+  $block = @()
+  if (Test-Path -LiteralPath $script:AiSecretsPath) {
+    $block += ""
+  }
+  $block += "[$SecretId]"
+  $block += "$Key = `"$escaped`""
+  Add-Content -LiteralPath $script:AiSecretsPath -Value (($block -join "`n") + "`n") -Encoding UTF8
+  return $true
+}
+
+function Resolve-AiSecretScaffold {
+  param(
+    [Parameter(Mandatory = $true)][string]$SecretId,
+    [Parameter(Mandatory = $true)][string]$Key,
+    [bool]$Interactive = $false
+  )
+
+  $existing = Get-AiTomlSecretSection -SecretId $SecretId
+  if ($existing.ContainsKey($Key) -and $existing[$Key]) {
+    return "$script:AiSecretsPath [$SecretId] $Key (already set)"
+  }
+
+  if ($Interactive) {
+    $value = Read-AiSecretInput -Prompt "Enter $Key for [$SecretId] (blank to skip)"
+    if ($value) {
+      if (Add-AiTomlSecretValue -SecretId $SecretId -Key $Key -Value $value) {
+        return "wrote $script:AiSecretsPath [$SecretId] $Key"
+      }
+      return "$script:AiSecretsPath [$SecretId] already present; left unchanged"
+    }
+  }
+
+  return "add $Key to $script:AiSecretsPath [$SecretId]"
+}
+
 function Set-CodexProfileEnvironment {
   param([Parameter(Mandatory = $true)]$Profile)
 
@@ -851,6 +1032,7 @@ function Set-CodexProfileEnvironment {
   New-Item -ItemType Directory -Force -Path $env:CODEX_HOME | Out-Null
   Remove-Item Env:CODEX_API_KEY -ErrorAction SilentlyContinue
   Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+  Clear-AiToolExtraEnv -Tool "codex"
 
   $secretSource = "<none>"
   if ($mode -eq "api") {
@@ -880,6 +1062,7 @@ function Set-CodexProfileEnvironment {
     }
   }
 
+  Set-AiProfileExtraEnv -Profile $Profile
   return $secretSource
 }
 
@@ -892,6 +1075,7 @@ function Set-ClaudeProfileEnvironment {
   foreach ($envName in @("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")) {
     Remove-Item "Env:$envName" -ErrorAction SilentlyContinue
   }
+  Clear-AiToolExtraEnv -Tool "claude"
 
   $secretSource = "<none>"
   if ($mode -eq "api") {
@@ -926,6 +1110,7 @@ function Set-ClaudeProfileEnvironment {
     }
   }
 
+  Set-AiProfileExtraEnv -Profile $Profile
   return $secretSource
 }
 
@@ -933,7 +1118,9 @@ function New-CodexProfileConfig {
   param(
     [Parameter(Mandatory = $true)]$Profile,
     [AllowNull()][string]$BaseUrl,
-    [AllowNull()][string]$Model
+    [AllowNull()][string]$Model,
+    [AllowNull()][string]$EnvKey,
+    [AllowNull()][string]$ProviderName
   )
 
   $mode = Get-AiProfileMode -Profile $Profile
@@ -943,29 +1130,31 @@ function New-CodexProfileConfig {
   }
 
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $profilePath) | Out-Null
-  $runtimeProfile = Get-CodexRuntimeProfileName -Profile $Profile
-  $providerName = $runtimeProfile
-  $displayName = (Get-AiProfileName -Profile $Profile).Replace(":", " ")
-  $modelValue = if ($Model) { $Model } else { "gpt-5.5" }
+  $providerId = "api-router"
+  $displayName = if ($ProviderName) { $ProviderName } else { (Get-AiProfileName -Profile $Profile).Replace(":", " ") }
+  $keyName = if ($EnvKey) { $EnvKey } else { "OPENAI_API_KEY" }
 
   if ($mode -eq "api") {
     $url = if ($BaseUrl) { $BaseUrl } else { "https://your-router.example/v1" }
-    @"
-model_provider = "$providerName"
-model = "$modelValue"
-disable_response_storage = true
-
-[model_providers.$providerName]
-name = "$displayName"
-base_url = "$url"
-wire_api = "responses"
-env_key = "OPENAI_API_KEY"
-"@ | Set-Content -LiteralPath $profilePath -Encoding UTF8
+    $lines = @("model_provider = `"$providerId`"")
+    if ($Model) {
+      $lines += "model = `"$Model`""
+    }
+    $lines += @(
+      "disable_response_storage = true"
+      ""
+      "[model_providers.$providerId]"
+      "name = `"$displayName`""
+      "base_url = `"$url`""
+      "env_key = `"$keyName`""
+    )
+    (($lines -join "`n") + "`n") | Set-Content -LiteralPath $profilePath -Encoding UTF8
   } else {
-    @"
-model_provider = "openai"
-model = "$modelValue"
-"@ | Set-Content -LiteralPath $profilePath -Encoding UTF8
+    $lines = @("model_provider = `"openai`"")
+    if ($Model) {
+      $lines += "model = `"$Model`""
+    }
+    (($lines -join "`n") + "`n") | Set-Content -LiteralPath $profilePath -Encoding UTF8
   }
 
   return $profilePath
@@ -974,19 +1163,33 @@ model = "$modelValue"
 function Add-CodexApiProfile {
   param([string[]]$Arguments)
 
-  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  $split = Split-AiEnvArguments -Arguments $Arguments
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $split.Rest
   if ($parsed.Positionals.Count -lt 1) {
-    throw "Usage: cx add-api <name> [--base-url URL] [--model MODEL] [--home PATH]"
+    throw "Usage: cx add-api <name> [--base-url URL] [--env-key NAME] [--provider-name NAME] [--model MODEL] [--home PATH] [--env KEY=VALUE ...]"
   }
 
   $name = [string]$parsed.Positionals[0]
   Assert-AiProfileName -Name $name
   $slug = Get-AiNameSlug -Name $name
+  $interactive = Test-AiInteractive
   $profileHome = Get-AiOption -Options $parsed.Options -Name "home" -Default "~/.codex"
   $runtimeProfile = Get-AiOption -Options $parsed.Options -Name "profile" -Default "api-$($slug.Replace(':', '-'))"
   $secretId = Get-AiOption -Options $parsed.Options -Name "secret-id" -Default "codex.$name"
-  $baseUrl = Get-AiOption -Options $parsed.Options -Name "base-url" -Default "https://your-router.example/v1"
-  $model = Get-AiOption -Options $parsed.Options -Name "model" -Default "gpt-5.5"
+  $model = Get-AiOption -Options $parsed.Options -Name "model"
+
+  $baseUrl = Get-AiOption -Options $parsed.Options -Name "base-url"
+  if (-not $baseUrl) {
+    $baseUrl = if ($interactive) { Read-AiInput -Prompt "Codex base_url" -Default "https://your-router.example/v1" } else { "https://your-router.example/v1" }
+  }
+  $envKey = Get-AiOption -Options $parsed.Options -Name "env-key"
+  if (-not $envKey) {
+    $envKey = if ($interactive) { Read-AiInput -Prompt "Codex env_key (secret variable name)" -Default "OPENAI_API_KEY" } else { "OPENAI_API_KEY" }
+  }
+  $providerName = Get-AiOption -Options $parsed.Options -Name "provider-name"
+  if (-not $providerName) {
+    $providerName = if ($interactive) { Read-AiInput -Prompt "Codex provider display name" -Default $name } else { $name }
+  }
 
   $profile = [pscustomobject]@{
     name = $name
@@ -999,13 +1202,21 @@ function Add-CodexApiProfile {
     linux_secret = "~/.ai-secrets/codex-$slug.env"
     description = "Codex API profile"
   }
+  if ($split.Env.Count -gt 0) {
+    $profile | Add-Member -NotePropertyName "env" -NotePropertyValue ([pscustomobject]$split.Env)
+  }
   Add-AiProfileRegistration -Tool "codex" -Profile $profile | Out-Null
-  $profilePath = New-CodexProfileConfig -Profile $profile -BaseUrl $baseUrl -Model $model
+  $profilePath = New-CodexProfileConfig -Profile $profile -BaseUrl $baseUrl -Model $model -EnvKey $envKey -ProviderName $providerName
+  $secretState = Resolve-AiSecretScaffold -SecretId $secretId -Key $envKey -Interactive $interactive
+
   Write-Host "Added Codex API profile '$name'."
   Write-Host "  Registry: $script:AiRegistryPath"
   Write-Host "  CODEX_HOME: $(Expand-AiPath $profileHome)"
   Write-Host "  Config: $profilePath"
-  Write-Host "  Secret: $script:AiSecretsPath [$secretId] with OPENAI_API_KEY"
+  Write-Host "  Secret: $secretState"
+  if ($split.Env.Count -gt 0) {
+    Write-Host "  Env: $(@($split.Env.Keys) -join ', ')"
+  }
 }
 
 function Add-CodexSubProfile {
@@ -1019,9 +1230,13 @@ function Add-CodexSubProfile {
   $name = [string]$parsed.Positionals[0]
   Assert-AiProfileName -Name $name
   $slug = Get-AiNameSlug -Name $name
-  $profileHome = Get-AiOption -Options $parsed.Options -Name "home" -Default "~/.codex-$slug"
+  $interactive = Test-AiInteractive
+  $profileHome = Get-AiOption -Options $parsed.Options -Name "home"
+  if (-not $profileHome) {
+    $profileHome = if ($interactive) { Read-AiInput -Prompt "Codex CODEX_HOME for this subscription" -Default "~/.codex-$slug" } else { "~/.codex-$slug" }
+  }
   $runtimeProfile = Get-AiOption -Options $parsed.Options -Name "profile" -Default "sub"
-  $model = Get-AiOption -Options $parsed.Options -Name "model" -Default "gpt-5.5"
+  $model = Get-AiOption -Options $parsed.Options -Name "model"
 
   $profile = [pscustomobject]@{
     name = $name
@@ -1066,16 +1281,26 @@ function Remove-CodexProfile {
 function Add-ClaudeApiProfile {
   param([string[]]$Arguments)
 
-  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  $split = Split-AiEnvArguments -Arguments $Arguments
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $split.Rest
   if ($parsed.Positionals.Count -lt 1) {
-    throw "Usage: cc add-api <name> [--base-url URL]"
+    throw "Usage: cc add-api <name> [--base-url URL] [--env-key NAME] [--env KEY=VALUE ...]"
   }
 
   $name = [string]$parsed.Positionals[0]
   Assert-AiProfileName -Name $name
   $slug = Get-AiNameSlug -Name $name
+  $interactive = Test-AiInteractive
   $secretId = Get-AiOption -Options $parsed.Options -Name "secret-id" -Default "claude.$name"
-  $baseUrl = Get-AiOption -Options $parsed.Options -Name "base-url" -Default $script:ClaudeRouterBaseUrl
+
+  $baseUrl = Get-AiOption -Options $parsed.Options -Name "base-url"
+  if (-not $baseUrl) {
+    $baseUrl = if ($interactive) { Read-AiInput -Prompt "Claude base_url" -Default $script:ClaudeRouterBaseUrl } else { $script:ClaudeRouterBaseUrl }
+  }
+  $envKey = Get-AiOption -Options $parsed.Options -Name "env-key"
+  if (-not $envKey) {
+    $envKey = if ($interactive) { Read-AiInput -Prompt "Claude secret variable (ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY)" -Default "ANTHROPIC_AUTH_TOKEN" } else { "ANTHROPIC_AUTH_TOKEN" }
+  }
 
   $profile = [pscustomobject]@{
     name = $name
@@ -1087,11 +1312,19 @@ function Add-ClaudeApiProfile {
     linux_secret = "~/.ai-secrets/claude-$slug.env"
     description = "Claude Code API profile"
   }
+  if ($split.Env.Count -gt 0) {
+    $profile | Add-Member -NotePropertyName "env" -NotePropertyValue ([pscustomobject]$split.Env)
+  }
   Add-AiProfileRegistration -Tool "claude" -Profile $profile | Out-Null
+  $secretState = Resolve-AiSecretScaffold -SecretId $secretId -Key $envKey -Interactive $interactive
+
   Write-Host "Added Claude Code API profile '$name'."
   Write-Host "  Registry: $script:AiRegistryPath"
   Write-Host "  Base URL: $baseUrl"
-  Write-Host "  Secret: $script:AiSecretsPath [$secretId] with ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
+  Write-Host "  Secret: $secretState"
+  if ($split.Env.Count -gt 0) {
+    Write-Host "  Env: $(@($split.Env.Keys) -join ', ')"
+  }
 }
 
 function Add-ClaudeSubProfile {
@@ -1342,6 +1575,9 @@ Usage:
   cx status          Print current saved/process state
   cx stats           Summarize local rollout token usage
   cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
+                     Options: --base-url URL --env-key NAME --provider-name NAME
+                              --model MODEL --home PATH --env KEY=VALUE
+                     Prompts for missing base-url/env-key and the secret in a terminal.
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
   cx help            Show this help
@@ -1378,6 +1614,8 @@ Usage:
   cc list            List registry profiles and local file status
   cc status          Print current saved/process state
   cc add-api NAME    Register a Claude Code API profile
+                     Options: --base-url URL --env-key NAME --env KEY=VALUE (repeatable)
+                     Prompts for missing base-url and the secret in a terminal.
   cc add-sub NAME    Register a Claude Code subscription label
   cc remove NAME     Remove a Claude Code profile registration
   cc help            Show this help
@@ -1393,6 +1631,9 @@ After switching, run Claude Code separately:
 Notes:
   cc does not launch Claude Code. Claude reads the environment variables set in this shell.
   A Claude API profile can define base_url; otherwise https://anyrouter.top is used.
+  --env adds non-secret per-profile vars (e.g. ANTHROPIC_DEFAULT_SONNET_MODEL,
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW) stored in the registry; exported on switch and
+    cleared when switching to another profile so values do not leak.
   Add commands only write profile metadata. Put real tokens in secrets.toml.
   Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
@@ -1431,6 +1672,7 @@ function Get-CodexProfileRows {
       Config = if (Test-Path -LiteralPath $profilePath) { $profilePath } else { "<missing> $profilePath" }
       Secret = if ($mode -eq "api") { Get-AiSecretDisplay -Tool "codex" -Profile $profile -Names @("OPENAI_API_KEY", "CODEX_API_KEY") } else { "<none>" }
       BaseUrl = Get-CodexBaseUrl -Profile $profile
+      Env = Get-AiProfileEnvSummary -Profile $profile
     }
   }
 }
@@ -1469,18 +1711,19 @@ function Get-ClaudeProfileRows {
       Ready = if ($secretOk) { "ok" } else { "missing secret" }
       Secret = if ($mode -eq "api") { Get-AiSecretDisplay -Tool "claude" -Profile $profile -Names @("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") } else { "<none>" }
       BaseUrl = $baseUrl
+      Env = Get-AiProfileEnvSummary -Profile $profile
     }
   }
 }
 
 function Show-CodexList {
   Write-Host "Codex profiles ($script:AiRegistryPath):"
-  Get-CodexProfileRows | Format-Table Sel, Name, Mode, Ready, Profile, Home, Config, Secret, BaseUrl -AutoSize
+  Get-CodexProfileRows | Format-Table Sel, Name, Mode, Ready, Profile, Home, Config, Secret, BaseUrl, Env -AutoSize
 }
 
 function Show-ClaudeList {
   Write-Host "Claude Code profiles ($script:AiRegistryPath):"
-  Get-ClaudeProfileRows | Format-Table Sel, Name, Mode, Ready, Secret, BaseUrl -AutoSize
+  Get-ClaudeProfileRows | Format-Table Sel, Name, Mode, Ready, Secret, BaseUrl, Env -AutoSize
 }
 
 function Show-CodexStatus {

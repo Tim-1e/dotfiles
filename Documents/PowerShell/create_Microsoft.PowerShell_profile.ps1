@@ -73,7 +73,8 @@ if (-not $env:CODEX_THREAD_ID -and (Get-Command oh-my-posh -ErrorAction Silently
 }
 
 # chezmoi-ai-env begin
-$aiEnv = Join-Path $HOME 'Documents\PowerShell\Scripts\ai-env.ps1'
+$aiEnvScriptHome = if ($env:AI_ENV_SCRIPT_HOME) { [Environment]::ExpandEnvironmentVariables($env:AI_ENV_SCRIPT_HOME) } else { $HOME }
+$aiEnv = Join-Path $aiEnvScriptHome 'Documents\PowerShell\Scripts\ai-env.ps1'
 if (Test-Path -LiteralPath $aiEnv) {
   . $aiEnv
 }

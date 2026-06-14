@@ -8,7 +8,9 @@ $ErrorActionPreference = "Stop"
 $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("ai-env-smoke-" + [guid]::NewGuid().ToString("N"))
 $testHome = Join-Path $tmpRoot "home"
 $previousAiEnvHome = $env:AI_ENV_HOME
+$previousNonInteractive = $env:AI_ENV_NONINTERACTIVE
 $env:AI_ENV_HOME = $testHome
+$env:AI_ENV_NONINTERACTIVE = "1"
 
 $aiEnvDir = Join-Path $testHome ".ai-env"
 $codexDir = Join-Path $testHome ".codex"
@@ -31,9 +33,15 @@ try {
 [codex.api]
 OPENAI_API_KEY = "sk-test-codex"
 
+[codex.cxenvtest]
+OPENAI_API_KEY = "sk-test-cxenv"
+
 [claude.api-docker]
 ANTHROPIC_BASE_URL = "https://anyrouter.top"
 ANTHROPIC_AUTH_TOKEN = "sk-test-token"
+
+[claude.envtest]
+ANTHROPIC_AUTH_TOKEN = "sk-test-envtoken"
 "@ | Set-Content -LiteralPath $secretsPath -Encoding UTF8
 
   . (Join-Path $SourceDir "Documents/PowerShell/Scripts/ai-env.ps1")
@@ -89,12 +97,40 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-token"
   if ($env:ANTHROPIC_AUTH_TOKEN -ne "sk-test-token") { throw "cc api:docker did not set ANTHROPIC_AUTH_TOKEN from TOML" }
   if ($env:CODEX_HOME -ne $codexDir) { throw "Unexpected CODEX_HOME: $env:CODEX_HOME" }
 
+  # --- per-profile env (--env): persisted in registry, exported on switch, cleared on switch-away ---
+  $ccAddEnv = (& { cc add-api envtest --base-url https://claude.test --env ANTHROPIC_DEFAULT_SONNET_MODEL=glm-test-sonnet --env CLAUDE_CODE_AUTO_COMPACT_WINDOW=987654 } 6>&1 | Out-String -Width 4096)
+  $cxAddEnv = (& { cx add-api cxenvtest --base-url https://router.test/v1 --env CODEX_EXTRA_FLAG=on } 6>&1 | Out-String -Width 4096)
+  $registryAfterEnv = Get-Content -LiteralPath $profilesPath -Raw
+  $ccEnvSwitch = (& { cc envtest } 6>&1 | Out-String -Width 4096)
+  $ccEnvSonnet = $env:ANTHROPIC_DEFAULT_SONNET_MODEL
+  $ccEnvWindow = $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  $ccEnvAway = (& { cc api:docker } 6>&1 | Out-String -Width 4096)
+  $ccEnvSonnetAfterAway = $env:ANTHROPIC_DEFAULT_SONNET_MODEL
+  $cxEnvSwitch = (& { cx cxenvtest } 6>&1 | Out-String -Width 4096)
+  $cxEnvFlag = $env:CODEX_EXTRA_FLAG
+  $cxEnvAway = (& { cx api } 6>&1 | Out-String -Width 4096)
+  $cxEnvFlagAfterAway = $env:CODEX_EXTRA_FLAG
+
+  if ($ccAddEnv -notmatch "Added Claude Code API profile 'envtest'") { throw "cc add-api --env did not report success" }
+  if ($ccAddEnv -notmatch "Env:") { throw "cc add-api did not report Env summary" }
+  if ($registryAfterEnv -notmatch "ANTHROPIC_DEFAULT_SONNET_MODEL") { throw "registry did not persist profile env map" }
+  if ($ccEnvSonnet -ne "glm-test-sonnet") { throw "cc switch did not export ANTHROPIC_DEFAULT_SONNET_MODEL from profile env" }
+  if ($ccEnvWindow -ne "987654") { throw "cc switch did not export CLAUDE_CODE_AUTO_COMPACT_WINDOW from profile env" }
+  if ($ccEnvSonnetAfterAway) { throw "cc switch-away did not clear the previous profile env var (leak)" }
+  if ($cxEnvFlag -ne "on") { throw "cx switch did not export CODEX_EXTRA_FLAG from profile env" }
+  if ($cxEnvFlagAfterAway) { throw "cx switch-away did not clear the previous profile env var (leak)" }
+
   Write-Host "AI env PowerShell smoke check passed."
 } finally {
   if ($null -ne $previousAiEnvHome) {
     $env:AI_ENV_HOME = $previousAiEnvHome
   } else {
     Remove-Item Env:AI_ENV_HOME -ErrorAction SilentlyContinue
+  }
+  if ($null -ne $previousNonInteractive) {
+    $env:AI_ENV_NONINTERACTIVE = $previousNonInteractive
+  } else {
+    Remove-Item Env:AI_ENV_NONINTERACTIVE -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

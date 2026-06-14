@@ -32,9 +32,15 @@ cat >"$tmp_home/.ai-secrets/secrets.toml" <<'EOF'
 [codex.api]
 OPENAI_API_KEY = "sk-test-codex"
 
+[codex.cxenvtest]
+OPENAI_API_KEY = "sk-test-cxenv"
+
 [claude.api-docker]
 ANTHROPIC_BASE_URL = "https://anyrouter.top"
 ANTHROPIC_AUTH_TOKEN = "sk-test-token"
+
+[claude.envtest]
+ANTHROPIC_AUTH_TOKEN = "sk-test-envtoken"
 EOF
 
 run_step() {
@@ -112,6 +118,23 @@ assert_contains() {
     echo "unexpected CODEX_HOME: got '${CODEX_HOME}', expected '$tmp_home/.codex'" >&2
     exit 1
   fi
+
+  # per-profile env (--env): persisted in registry, exported on switch, cleared on switch-away
+  export AI_ENV_NONINTERACTIVE=1
+  run_step cc-add-env cc add-api envtest --base-url https://claude.test --env ANTHROPIC_DEFAULT_SONNET_MODEL=glm-test-sonnet --env CLAUDE_CODE_AUTO_COMPACT_WINDOW=987654
+  run_step cx-add-env cx add-api cxenvtest --base-url https://router.test/v1 --env CODEX_EXTRA_FLAG=on
+  assert_contains "ANTHROPIC_DEFAULT_SONNET_MODEL" "$tmp_home/.ai-env/profiles.json"
+  assert_contains "Env: ANTHROPIC_DEFAULT_SONNET_MODEL" "$debug_dir/cc-add-env.out"
+
+  cc envtest >"$debug_dir/cc-envtest.out" 2>&1
+  [ "${ANTHROPIC_DEFAULT_SONNET_MODEL:-}" = "glm-test-sonnet" ] || { echo "cc switch did not export profile env" >&2; exit 1; }
+  [ "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" = "987654" ] || { echo "cc switch did not export compact window" >&2; exit 1; }
+  cc api:docker >"$debug_dir/cc-env-away.out" 2>&1
+  [ -z "${ANTHROPIC_DEFAULT_SONNET_MODEL:-}" ] || { echo "cc switch-away did not clear profile env (leak)" >&2; exit 1; }
+  cx cxenvtest >"$debug_dir/cx-envtest.out" 2>&1
+  [ "${CODEX_EXTRA_FLAG:-}" = "on" ] || { echo "cx switch did not export profile env" >&2; exit 1; }
+  cx api >"$debug_dir/cx-env-away.out" 2>&1
+  [ -z "${CODEX_EXTRA_FLAG:-}" ] || { echo "cx switch-away did not clear profile env (leak)" >&2; exit 1; }
 )
 
 if command -v zsh >/dev/null 2>&1; then

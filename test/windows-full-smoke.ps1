@@ -47,7 +47,7 @@ Assert-File -Path $registryPath
 Assert-File -Path (Join-Path $codexHome "config.toml")
 Assert-File -Path (Join-Path $codexHome "sub.config.toml")
 Assert-File -Path (Join-Path $codexHome "api.config.toml")
-Assert-File -Path (Join-Path $codexHome "api-docker.config.toml")
+Assert-File -Path (Join-Path $codexHome "zc-ultra.config.toml")
 Assert-File -Path (Join-Path $HOME ".claude\settings.json")
 
 Assert-Contains -Path $profilePath -Pattern "chezmoi-ai-env begin" -Message "PowerShell profile is missing the ai-env begin marker."

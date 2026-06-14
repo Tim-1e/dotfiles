@@ -229,6 +229,10 @@ const out = { positionals: [], options: {} };
 const args = process.argv.slice(1);
 for (let i = 0; i < args.length; i++) {
   const arg = String(args[i]);
+  if (arg === "--env" && i + 1 < args.length) {
+    (out.env = out.env || []).push(String(args[++i]));
+    continue;
+  }
   if (arg.startsWith("--")) {
     const key = arg.slice(2);
     if (!key) continue;
@@ -272,6 +276,7 @@ for (let i = 1; i < process.argv.length; i += 2) {
   const key = process.argv[i];
   const raw = process.argv[i + 1] || "";
   if (key === "aliases") profile[key] = raw ? raw.split(",").filter(Boolean) : [];
+  else if (key === "env") { if (raw) profile[key] = JSON.parse(raw); }
   else profile[key] = raw;
 }
 process.stdout.write(JSON.stringify(profile));
@@ -377,6 +382,124 @@ _ai_apply_toml_secret() {
   [ -n "$exports" ] || return 1
   eval "$exports"
   AI_SECRET_SOURCE="${AI_SECRETS_PATH}#${secret_id}"
+}
+
+# Union of extra-env keys declared by any profile of the tool (for cleanup on switch).
+_ai_all_env_keys() {
+  local tool="$1"
+  [ -f "$AI_REGISTRY_PATH" ] || return 0
+  _ai_require_node || return 1
+  node -e '
+const fs = require("fs");
+let registry;
+try { registry = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(0); }
+const keys = new Set();
+for (const p of registry[process.argv[2]] || []) {
+  if (p && p.env && typeof p.env === "object") for (const k of Object.keys(p.env)) keys.add(k);
+}
+for (const k of keys) console.log(k);
+' "$AI_REGISTRY_PATH" "$tool"
+}
+
+# Emit `export KEY=value` lines for a profile's env map (shell-quoted).
+_ai_profile_env_exports() {
+  local profile_json="$1"
+  _ai_require_node || return 1
+  node -e '
+const p = JSON.parse(process.argv[1]);
+const quote = (value) => {
+  const text = String(value);
+  return "'"'"'" + text.replace(/'"'"'/g, "'"'"'\\'"'"''"'"'") + "'"'"'";
+};
+const env = (p && p.env && typeof p.env === "object") ? p.env : {};
+for (const [k, v] of Object.entries(env)) console.log(`export ${k}=${quote(v)}`);
+' "$profile_json"
+}
+
+# Build a JSON object from parsed --env KEY=VALUE pairs (empty string if none).
+_ai_mgmt_env_json() {
+  local parsed="$1"
+  _ai_require_node || return 1
+  node -e '
+const parsed = JSON.parse(process.argv[1]);
+const env = {};
+for (const pair of parsed.env || []) {
+  const s = String(pair);
+  const idx = s.indexOf("=");
+  if (idx < 1) continue;
+  env[s.slice(0, idx)] = s.slice(idx + 1);
+}
+process.stdout.write(Object.keys(env).length ? JSON.stringify(env) : "");
+' "$parsed"
+}
+
+_ai_env_keys_csv() {
+  local env_json="$1"
+  [ -n "$env_json" ] || return 0
+  _ai_require_node || return 1
+  node -e 'const e=JSON.parse(process.argv[1]||"{}");process.stdout.write(Object.keys(e).join(", "));' "$env_json"
+}
+
+_ai_interactive() {
+  [ -z "${AI_ENV_NONINTERACTIVE:-}" ] || return 1
+  [ -t 0 ] || return 1
+  return 0
+}
+
+_ai_prompt() {
+  local prompt="$1" default_value="${2:-}" answer label
+  if [ -n "$default_value" ]; then label="$prompt [$default_value]: "; else label="$prompt: "; fi
+  printf '%s' "$label" >&2
+  IFS= read -r answer || answer=""
+  [ -n "$answer" ] || answer="$default_value"
+  printf '%s' "$answer"
+}
+
+_ai_prompt_secret() {
+  local prompt="$1" answer
+  printf '%s: ' "$prompt" >&2
+  if [ -n "${BASH_VERSION:-}" ] || [ -n "${ZSH_VERSION:-}" ]; then
+    read -rs answer || answer=""
+  else
+    read -r answer || answer=""
+  fi
+  printf '\n' >&2
+  printf '%s' "$answer"
+}
+
+_ai_secret_section_exists() {
+  local secret_id="$1"
+  [ -f "$AI_SECRETS_PATH" ] || return 1
+  awk -v want="[$secret_id]" '{ line=$0; gsub(/^[ \t]+|[ \t]+$/,"",line); if (line==want) { found=1; exit } } END { exit found?0:1 }' "$AI_SECRETS_PATH"
+}
+
+_ai_append_secret() {
+  local secret_id="$1" key="$2" value="$3" esc
+  mkdir -p "$(dirname "$AI_SECRETS_PATH")"
+  esc="$(printf '%s' "$value" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  {
+    [ -f "$AI_SECRETS_PATH" ] && printf '\n'
+    printf '[%s]\n' "$secret_id"
+    printf '%s = "%s"\n' "$key" "$esc"
+  } >>"$AI_SECRETS_PATH"
+}
+
+# Returns a human-readable status; in interactive shells prompts for and writes a missing secret.
+_ai_scaffold_secret() {
+  local secret_id="$1" key="$2" interactive="$3" value
+  if _ai_toml_secret_exports "$secret_id" "$key" >/dev/null 2>&1; then
+    printf '%s [%s] %s (already set)' "$AI_SECRETS_PATH" "$secret_id" "$key"
+    return 0
+  fi
+  if [ "$interactive" = "1" ] && ! _ai_secret_section_exists "$secret_id"; then
+    value="$(_ai_prompt_secret "Enter $key for [$secret_id] (blank to skip)")"
+    if [ -n "$value" ]; then
+      _ai_append_secret "$secret_id" "$key" "$value"
+      printf 'wrote %s [%s] %s' "$AI_SECRETS_PATH" "$secret_id" "$key"
+      return 0
+    fi
+  fi
+  printf 'add %s to %s [%s]' "$key" "$AI_SECRETS_PATH" "$secret_id"
 }
 
 _ai_secret_preview() {
@@ -549,6 +672,8 @@ _set_codex_env() {
   mkdir -p "$CODEX_HOME"
   unset CODEX_API_KEY
   unset OPENAI_API_KEY
+  local _ai_k
+  for _ai_k in $(_ai_all_env_keys codex 2>/dev/null); do unset "$_ai_k" 2>/dev/null || true; done
 
   AI_SECRET_SOURCE="<none>"
   if [ "$mode" = "api" ]; then
@@ -584,6 +709,8 @@ _set_codex_env() {
       return 1
     fi
   fi
+
+  eval "$(_ai_profile_env_exports "$profile_json" 2>/dev/null)"
 }
 
 _set_claude_env() {
@@ -595,6 +722,8 @@ _set_claude_env() {
   unset ANTHROPIC_AUTH_TOKEN
   unset ANTHROPIC_BASE_URL
   unset ANTHROPIC_MODEL
+  local _ai_k
+  for _ai_k in $(_ai_all_env_keys claude 2>/dev/null); do unset "$_ai_k" 2>/dev/null || true; done
 
   AI_SECRET_SOURCE="<none>"
   if [ "$mode" = "api" ]; then
@@ -616,76 +745,99 @@ _set_claude_env() {
       return 1
     fi
   fi
+
+  eval "$(_ai_profile_env_exports "$profile_json" 2>/dev/null)"
 }
 
 _cx_write_config_if_missing() {
-  local profile_json="$1" base_url="${2:-}" model="${3:-gpt-5.5}" mode name profile_file provider display_name
+  local profile_json="$1" base_url="${2:-}" model="${3:-}" env_key="${4:-OPENAI_API_KEY}" provider_name="${5:-}" mode name profile_file provider_id
   mode="$(_ai_profile_value "$profile_json" mode sub)"
   name="$(_ai_profile_value "$profile_json" name "")"
   profile_file="$(_codex_profile_path "$profile_json")"
   [ -f "$profile_file" ] && { printf '%s\n' "$profile_file"; return 0; }
   mkdir -p "$(dirname "$profile_file")"
-  provider="$(_codex_profile_name "$profile_json")"
-  display_name="${name//:/ }"
+  provider_id="api-router"
+  [ -n "$provider_name" ] || provider_name="${name//:/ }"
+  [ -n "$env_key" ] || env_key="OPENAI_API_KEY"
 
   if [ "$mode" = "api" ]; then
     [ -n "$base_url" ] || base_url="https://your-router.example/v1"
-    cat >"$profile_file" <<EOF
-model_provider = "$provider"
-model = "$model"
-disable_response_storage = true
-
-[model_providers.$provider]
-name = "$display_name"
-base_url = "$base_url"
-wire_api = "responses"
-env_key = "OPENAI_API_KEY"
-EOF
+    {
+      printf 'model_provider = "%s"\n' "$provider_id"
+      [ -n "$model" ] && printf 'model = "%s"\n' "$model"
+      printf 'disable_response_storage = true\n\n'
+      printf '[model_providers.%s]\n' "$provider_id"
+      printf 'name = "%s"\n' "$provider_name"
+      printf 'base_url = "%s"\n' "$base_url"
+      printf 'env_key = "%s"\n' "$env_key"
+    } >"$profile_file"
   else
-    cat >"$profile_file" <<EOF
-model_provider = "openai"
-model = "$model"
-EOF
+    {
+      printf 'model_provider = "openai"\n'
+      [ -n "$model" ] && printf 'model = "%s"\n' "$model"
+    } >"$profile_file"
   fi
 
   printf '%s\n' "$profile_file"
 }
 
 _cx_add_api() {
-  local parsed name slug home runtime_profile secret_id base_url model profile_json profile_file
+  local parsed name slug home runtime_profile secret_id base_url model env_key provider_name env_json profile_json profile_file secret_state interactive
   parsed="$(_ai_parse_management_args "$@")" || return
   name="$(_ai_mgmt_positional "$parsed" 0)"
-  [ -n "$name" ] || { echo "Usage: cx add-api <name> [--base-url URL] [--model MODEL] [--home PATH]" >&2; return 1; }
+  [ -n "$name" ] || { echo "Usage: cx add-api <name> [--base-url URL] [--env-key NAME] [--provider-name NAME] [--model MODEL] [--home PATH] [--env KEY=VALUE ...]" >&2; return 1; }
   _ai_validate_name "$name" || return
   slug="$(_ai_name_slug "$name")" || return
+  interactive=0; _ai_interactive && interactive=1
   home="$(_ai_mgmt_value "$parsed" home "~/.codex")"
   runtime_profile="$(_ai_mgmt_value "$parsed" profile "api-${slug//:/-}")"
   secret_id="$(_ai_mgmt_value "$parsed" secret-id "codex.$name")"
-  base_url="$(_ai_mgmt_value "$parsed" base-url "https://your-router.example/v1")"
-  model="$(_ai_mgmt_value "$parsed" model "gpt-5.5")"
+  model="$(_ai_mgmt_value "$parsed" model "")"
+  env_json="$(_ai_mgmt_env_json "$parsed")"
+
+  base_url="$(_ai_mgmt_value "$parsed" base-url "")"
+  if [ -z "$base_url" ]; then
+    if [ "$interactive" = "1" ]; then base_url="$(_ai_prompt "Codex base_url" "https://your-router.example/v1")"; else base_url="https://your-router.example/v1"; fi
+  fi
+  env_key="$(_ai_mgmt_value "$parsed" env-key "")"
+  if [ -z "$env_key" ]; then
+    if [ "$interactive" = "1" ]; then env_key="$(_ai_prompt "Codex env_key (secret variable name)" "OPENAI_API_KEY")"; else env_key="OPENAI_API_KEY"; fi
+  fi
+  provider_name="$(_ai_mgmt_value "$parsed" provider-name "")"
+  if [ -z "$provider_name" ]; then
+    if [ "$interactive" = "1" ]; then provider_name="$(_ai_prompt "Codex provider display name" "$name")"; else provider_name="$name"; fi
+  fi
+
   profile_json="$(_ai_json_profile \
     name "$name" aliases "" mode api home "$home" codex_profile "$runtime_profile" \
     secret_id "$secret_id" linux_secret "~/.ai-secrets/codex-$slug.env" windows_secret "~/.ai-secrets/codex-$slug.ps1" \
-    description "Codex API profile")"
+    description "Codex API profile" env "$env_json")"
   _ai_registry_add_profile codex "$profile_json" || return
-  profile_file="$(_cx_write_config_if_missing "$profile_json" "$base_url" "$model")"
+  profile_file="$(_cx_write_config_if_missing "$profile_json" "$base_url" "$model" "$env_key" "$provider_name")"
+  secret_state="$(_ai_scaffold_secret "$secret_id" "$env_key" "$interactive")"
   echo "Added Codex API profile '$name'."
   echo "  Registry: $AI_REGISTRY_PATH"
   echo "  CODEX_HOME: $(_ai_expand_path "$home")"
   echo "  Config: $profile_file"
-  echo "  Secret: $AI_SECRETS_PATH [$secret_id] with OPENAI_API_KEY"
+  echo "  Secret: $secret_state"
+  [ -n "$env_json" ] && echo "  Env: $(_ai_env_keys_csv "$env_json")"
+  return 0
 }
 
 _cx_add_sub() {
-  local parsed name slug home runtime_profile model profile_json profile_file
+  local parsed name slug home runtime_profile model profile_json profile_file interactive
   parsed="$(_ai_parse_management_args "$@")" || return
   name="$(_ai_mgmt_positional "$parsed" 0)"
   [ -n "$name" ] || { echo "Usage: cx add-sub <name> [--home PATH] [--model MODEL]" >&2; return 1; }
   _ai_validate_name "$name" || return
   slug="$(_ai_name_slug "$name")" || return
-  home="$(_ai_mgmt_value "$parsed" home "~/.codex-$slug")"
+  interactive=0; _ai_interactive && interactive=1
+  home="$(_ai_mgmt_value "$parsed" home "")"
+  if [ -z "$home" ]; then
+    if [ "$interactive" = "1" ]; then home="$(_ai_prompt "Codex CODEX_HOME for this subscription" "~/.codex-$slug")"; else home="~/.codex-$slug"; fi
+  fi
   runtime_profile="$(_ai_mgmt_value "$parsed" profile "sub")"
-  model="$(_ai_mgmt_value "$parsed" model "gpt-5.5")"
+  model="$(_ai_mgmt_value "$parsed" model "")"
   profile_json="$(_ai_json_profile \
     name "$name" aliases "" mode sub home "$home" codex_profile "$runtime_profile" \
     description "Codex subscription profile")"
@@ -721,23 +873,37 @@ _cx_remove_profile() {
 }
 
 _cc_add_api() {
-  local parsed name slug secret_id base_url profile_json
+  local parsed name slug secret_id base_url env_key env_json profile_json secret_state interactive
   parsed="$(_ai_parse_management_args "$@")" || return
   name="$(_ai_mgmt_positional "$parsed" 0)"
-  [ -n "$name" ] || { echo "Usage: cc add-api <name> [--base-url URL]" >&2; return 1; }
+  [ -n "$name" ] || { echo "Usage: cc add-api <name> [--base-url URL] [--env-key NAME] [--env KEY=VALUE ...]" >&2; return 1; }
   _ai_validate_name "$name" || return
   slug="$(_ai_name_slug "$name")" || return
+  interactive=0; _ai_interactive && interactive=1
   secret_id="$(_ai_mgmt_value "$parsed" secret-id "claude.$name")"
-  base_url="$(_ai_mgmt_value "$parsed" base-url "$CLAUDE_ROUTER_BASE_URL")"
+  env_json="$(_ai_mgmt_env_json "$parsed")"
+
+  base_url="$(_ai_mgmt_value "$parsed" base-url "")"
+  if [ -z "$base_url" ]; then
+    if [ "$interactive" = "1" ]; then base_url="$(_ai_prompt "Claude base_url" "$CLAUDE_ROUTER_BASE_URL")"; else base_url="$CLAUDE_ROUTER_BASE_URL"; fi
+  fi
+  env_key="$(_ai_mgmt_value "$parsed" env-key "")"
+  if [ -z "$env_key" ]; then
+    if [ "$interactive" = "1" ]; then env_key="$(_ai_prompt "Claude secret variable (ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY)" "ANTHROPIC_AUTH_TOKEN")"; else env_key="ANTHROPIC_AUTH_TOKEN"; fi
+  fi
+
   profile_json="$(_ai_json_profile \
     name "$name" aliases "" mode api base_url "$base_url" secret_id "$secret_id" \
     linux_secret "~/.ai-secrets/claude-$slug.env" windows_secret "~/.ai-secrets/claude-$slug.ps1" \
-    description "Claude Code API profile")"
+    description "Claude Code API profile" env "$env_json")"
   _ai_registry_add_profile claude "$profile_json" || return
+  secret_state="$(_ai_scaffold_secret "$secret_id" "$env_key" "$interactive")"
   echo "Added Claude Code API profile '$name'."
   echo "  Registry: $AI_REGISTRY_PATH"
   echo "  Base URL: $base_url"
-  echo "  Secret: $AI_SECRETS_PATH [$secret_id] with ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
+  echo "  Secret: $secret_state"
+  [ -n "$env_json" ] && echo "  Env: $(_ai_env_keys_csv "$env_json")"
+  return 0
 }
 
 _cc_add_sub() {
@@ -969,7 +1135,7 @@ const parseSecrets = (file) => {
 let registry = JSON.parse(fs.readFileSync(path, "utf8"));
 const secrets = parseSecrets(secretsPath);
 const secretVars = tool === "codex" ? ["OPENAI_API_KEY", "CODEX_API_KEY"] : ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-console.log(["Sel", "Name", "Mode", "Ready", "Runtime", "Secret", "Description"].join("\t"));
+console.log(["Sel", "Name", "Mode", "Ready", "Runtime", "Secret", "Env", "Description"].join("\t"));
 for (const p of registry[tool] || []) {
   const mode = p.mode || "sub";
   const runtime = tool === "codex" ? `${expand(p.home || "~/.codex")}/${p.codex_profile || p.profile || String(p.name || "").replace(":", "-")}.config.toml` : (p.base_url || "local subscription");
@@ -984,7 +1150,9 @@ for (const p of registry[tool] || []) {
   const secretOk = mode !== "api" || tomlReady || legacyReady;
   const ready = tool === "codex" && mode === "sub" && !configOk ? "ok-default" : (configOk && secretOk ? "ok" : (!configOk ? "missing-config" : "missing-secret"));
   const selected = String(p.name || "") === saved ? "*" : " ";
-  console.log([selected, p.name || "", mode, ready, runtime, secret || "<missing>", p.description || ""].join("\t"));
+  const envCount = (p.env && typeof p.env === "object") ? Object.keys(p.env).length : 0;
+  const envCell = envCount ? String(envCount) : "<none>";
+  console.log([selected, p.name || "", mode, ready, runtime, secret || "<missing>", envCell, p.description || ""].join("\t"));
 }
 ' "$AI_REGISTRY_PATH" "$tool" "$(_ai_saved_profile "$tool")" "$AI_SECRETS_PATH")" || return 1
 
@@ -1012,6 +1180,9 @@ Usage:
   cx status          Print current state
   cx stats           Summarize local rollout token usage
   cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
+                     Options: --base-url URL --env-key NAME --provider-name NAME
+                              --model MODEL --home PATH --env KEY=VALUE
+                     Prompts for missing base-url/env-key and the secret in a terminal.
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
   cx help            Show this help
@@ -1094,6 +1265,9 @@ Usage:
   cc list            List registry profiles
   cc status          Print current state
   cc add-api NAME    Register a Claude Code API profile
+                     Options: --base-url URL --env-key NAME --env KEY=VALUE (repeatable)
+                     Prompts for missing base-url and the secret in a terminal.
+                     --env adds non-secret per-profile vars (model mapping, compact window).
   cc add-sub NAME    Register a Claude Code subscription label
   cc remove NAME     Remove a Claude Code profile registration
   cc help            Show this help

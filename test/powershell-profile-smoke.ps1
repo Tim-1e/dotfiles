@@ -5,36 +5,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Save-FileContent {
-  param([Parameter(Mandatory = $true)][string]$Path)
-
-  if (Test-Path -LiteralPath $Path) {
-    return [pscustomobject]@{
-      Exists = $true
-      Bytes = [System.IO.File]::ReadAllBytes($Path)
-    }
-  }
-
-  return [pscustomobject]@{
-    Exists = $false
-    Bytes = $null
-  }
-}
-
-function Restore-FileContent {
-  param(
-    [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)]$Backup
-  )
-
-  if ($Backup.Exists) {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
-    [System.IO.File]::WriteAllBytes($Path, $Backup.Bytes)
-  } else {
-    Remove-Item -LiteralPath $Path -ErrorAction SilentlyContinue
-  }
-}
-
 function Assert-Contains {
   param(
     [Parameter(Mandatory = $true)][string]$Text,
@@ -51,15 +21,14 @@ $profileSource = Join-Path $SourceDir "Documents\PowerShell\create_Microsoft.Pow
 $aiEnvSource = Join-Path $SourceDir "Documents\PowerShell\Scripts\ai-env.ps1"
 $registrySource = Join-Path $SourceDir "dot_ai-env\create_profiles.json"
 
-$aiEnvTarget = Join-Path $HOME "Documents\PowerShell\Scripts\ai-env.ps1"
-$registryTarget = Join-Path $HOME ".ai-env\profiles.json"
-$stateTarget = Join-Path $HOME ".ai-env\state.json"
+$tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("powershell-profile-smoke-" + [guid]::NewGuid().ToString("N"))
+$testHome = Join-Path $tmpRoot "home"
+$aiEnvTarget = Join-Path $testHome "Documents\PowerShell\Scripts\ai-env.ps1"
+$registryTarget = Join-Path $testHome ".ai-env\profiles.json"
+$stateTarget = Join-Path $testHome ".ai-env\state.json"
 
-$aiEnvBackup = Save-FileContent -Path $aiEnvTarget
-$registryBackup = Save-FileContent -Path $registryTarget
-$stateBackup = Save-FileContent -Path $stateTarget
 $envBackup = @{}
-foreach ($name in @("CODEX_THREAD_ID", "CODEX_HOME", "AI_CODEX_LABEL", "AI_CODEX_PROFILE", "AI_CLAUDE_LABEL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")) {
+foreach ($name in @("CODEX_THREAD_ID", "AI_ENV_HOME", "AI_ENV_SCRIPT_HOME", "CODEX_HOME", "AI_CODEX_LABEL", "AI_CODEX_PROFILE", "AI_CLAUDE_LABEL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")) {
   $envBackup[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 
@@ -70,6 +39,8 @@ try {
   Remove-Item -LiteralPath $stateTarget -ErrorAction SilentlyContinue
 
   $env:CODEX_THREAD_ID = "profile-smoke"
+  $env:AI_ENV_HOME = $testHome
+  $env:AI_ENV_SCRIPT_HOME = $testHome
   . $profileSource
 
   foreach ($functionName in @("act", "deact", "python", "cx", "cc")) {
@@ -87,16 +58,13 @@ try {
   if ($cxHelp -notmatch "cx - switch Codex state") { throw "cx help output missing header after profile load." }
   if ($ccHelp -notmatch "cc - switch Claude Code state") { throw "cc help output missing header after profile load." }
 
-  $expectedCodexHome = Join-Path $HOME ".codex"
+  $expectedCodexHome = Join-Path $testHome ".codex"
   if ($env:CODEX_HOME -ne $expectedCodexHome) {
     throw "Unexpected CODEX_HOME after profile load: $env:CODEX_HOME"
   }
 
   Write-Host "PowerShell profile smoke check passed."
 } finally {
-  Restore-FileContent -Path $aiEnvTarget -Backup $aiEnvBackup
-  Restore-FileContent -Path $registryTarget -Backup $registryBackup
-  Restore-FileContent -Path $stateTarget -Backup $stateBackup
   foreach ($name in $envBackup.Keys) {
     if ($null -eq $envBackup[$name]) {
       [Environment]::SetEnvironmentVariable($name, $null, "Process")
@@ -104,4 +72,5 @@ try {
       [Environment]::SetEnvironmentVariable($name, $envBackup[$name], "Process")
     }
   }
+  Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
