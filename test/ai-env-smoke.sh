@@ -135,6 +135,63 @@ assert_contains() {
   [ "${CODEX_EXTRA_FLAG:-}" = "on" ] || { echo "cx switch did not export profile env" >&2; exit 1; }
   cx api >"$debug_dir/cx-env-away.out" 2>&1
   [ -z "${CODEX_EXTRA_FLAG:-}" ] || { echo "cx switch-away did not clear profile env (leak)" >&2; exit 1; }
+
+  # --- health: mock the network probe, test cache/cell/select/probe-model/default ---
+  _ai_probe_health() {
+    case "$(_ai_profile_value "$2" name "")" in
+      hgood) printf '{"status":"healthy","latencyMs":120,"method":"generation","error":null}';;
+      hbad)  printf '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 401"}';;
+      hslow) printf '{"status":"degraded","latencyMs":9999,"method":"generation","error":"HTTP 429 (transient)"}';;
+      *)     printf '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 404"}';;
+    esac
+  }
+  cc add-api hgood --base-url https://h.test >/dev/null 2>&1
+  cc add-api hbad  --base-url https://h.test >/dev/null 2>&1
+  cc add-api hslow --base-url https://h.test >/dev/null 2>&1
+  cc probe-model hgood my-sonnet >/dev/null 2>&1
+  [ "$(_ai_profile_value "$(_ai_profile_json claude hgood)" probe_model "")" = "my-sonnet" ] || { echo "probe-model set failed" >&2; exit 1; }
+  cc probe-model hgood >/dev/null 2>&1
+  [ -z "$(_ai_profile_value "$(_ai_profile_json claude hgood)" probe_model "")" ] || { echo "probe-model clear failed" >&2; exit 1; }
+  cc default hbad >/dev/null 2>&1
+  [ "$(_ai_default_profile claude)" = "hbad" ] || { echo "default set failed" >&2; exit 1; }
+  rm -f "$AI_HEALTH_PATH"
+  pj="$(_ai_profile_json claude hgood)"
+  r1="$(_ai_health_cached claude "$pj" 0)"
+  [ -f "$AI_HEALTH_PATH" ] || { echo "health.json not written" >&2; exit 1; }
+  case "$(_ai_health_cell "$r1")" in 🟢120ms) :;; *) echo "health cell wrong: $(_ai_health_cell "$r1")" >&2; exit 1;; esac
+  [ "$(_ai_healthy_profile claude)" = "hgood" ] || { echo "auto-select did not skip down -> hgood" >&2; exit 1; }
+  cc status >/dev/null 2>&1
+  grep -q "Health:" < <(cc status 2>/dev/null) || { echo "cc status missing Health line" >&2; exit 1; }
+  cc health-clear; [ ! -f "$AI_HEALTH_PATH" ] || { echo "health-clear failed" >&2; exit 1; }
+  mcp list >/dev/null 2>&1 || { echo "mcp command failed" >&2; exit 1; }
+
+  # --- mcp: offline (file-only, no network) ---
+  export AI_CLAUDE_JSON_PATH="$tmp_home/.claude.json"
+  export AI_CODEX_CONFIG_PATH="$tmp_home/.codex/config.toml"
+  cat >"$AI_MCP_PATH" <<'TOML'
+[mcp.context7]
+command = ["npx", "-y", "@upstash/context7-mcp"]
+sync = ["claude", "codex"]
+enabled = true
+
+[mcp.figma]
+url = "https://mcp.figma.com/mcp"
+sync = ["codex"]
+enabled = false
+TOML
+  echo '{"mcpServers":{}}' >"$AI_CLAUDE_JSON_PATH"
+  : >"$AI_CODEX_CONFIG_PATH"
+  mcp sync >/dev/null 2>&1
+  grep -q '"context7"' "$AI_CLAUDE_JSON_PATH" || { echo "mcp sync: claude missing context7" >&2; exit 1; }
+  ! grep -q '"figma"' "$AI_CLAUDE_JSON_PATH" || { echo "mcp sync: claude should not have disabled figma" >&2; exit 1; }
+  grep -q '\[mcp_servers.context7\]' "$AI_CODEX_CONFIG_PATH" || { echo "mcp sync: codex missing context7" >&2; exit 1; }
+  ! grep -q '\[mcp_servers.figma\]' "$AI_CODEX_CONFIG_PATH" || { echo "mcp sync: codex should not have disabled figma" >&2; exit 1; }
+  grep -q context7 < <(mcp list) || { echo "mcp list missing context7" >&2; exit 1; }
+  rm -f "$AI_MCP_PATH"
+  echo '{"mcpServers":{"newone":{"command":"echo"}}}' >"$AI_CLAUDE_JSON_PATH"
+  : >"$AI_CODEX_CONFIG_PATH"
+  grep -q '+1 added' < <(mcp pull 2>&1) || { echo "mcp pull did not add newone" >&2; exit 1; }
+  grep -q '\[mcp.newone\]' "$AI_MCP_PATH" || { echo "mcp pull did not write newone" >&2; exit 1; }
 )
 
 if command -v zsh >/dev/null 2>&1; then

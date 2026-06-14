@@ -1213,7 +1213,7 @@ EOF
       echo "  CODEX_HOME: ${CODEX_HOME:-$HOME/.codex}"
       echo "  OPENAI_API_KEY: $(_ai_secret_preview "${OPENAI_API_KEY:-}")"
       echo "  Cached login: $(_codex_login_status)"
-      profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _cx_doctor_summary "$profile_json"
+      profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _ai_health_status_line codex "$profile_json"
       return
       ;;
     stats)
@@ -1236,12 +1236,34 @@ EOF
       _cx_remove_profile "$@"
       return
       ;;
+    health)
+      shift
+      _hf=0; case "$*" in *--fresh*|*-f*) _hf=1;; esac
+      _ai_health_show codex "$_hf"
+      return
+      ;;
+    doctor)
+      profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _cx_doctor_summary "$profile_json"
+      return
+      ;;
+    default)
+      shift; _ai_set_default codex "$@"; return
+      ;;
+    probe-model)
+      shift; _ai_set_probe_model codex "$@"; return
+      ;;
+    health-clear)
+      _ai_health_clear; echo "health cache cleared"; return
+      ;;
+    next)
+      arg="$(_ai_next_profile codex)"
+      ;;
   esac
 
   if [ -n "$arg" ]; then
     profile_json="$(_ai_profile_json codex "$arg")" || { echo "Unknown cx profile '$arg'. Add it to $AI_REGISTRY_PATH or run 'cx help'." >&2; return 1; }
   else
-    profile_json="$(_ai_profile_json codex "$(_ai_next_profile codex)")" || return 1
+    profile_json="$(_ai_profile_json codex "$(_ai_healthy_profile codex)")" || return 1
   fi
   name="$(_ai_profile_value "$profile_json" name "")"
   _ai_save_profile codex "$name" || return
@@ -1297,6 +1319,7 @@ EOF
       echo "  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-<unset>}"
       echo "  ANTHROPIC_API_KEY: $(_ai_secret_preview "${ANTHROPIC_API_KEY:-}")"
       echo "  ANTHROPIC_AUTH_TOKEN: $(_ai_secret_preview "${ANTHROPIC_AUTH_TOKEN:-}")"
+      profile_json="$(_ai_profile_json claude "${AI_CLAUDE_LABEL:-$(_ai_saved_profile claude)}")" && _ai_health_status_line claude "$profile_json"
       _cc_external_status
       return
       ;;
@@ -1315,12 +1338,30 @@ EOF
       _cc_remove_profile "$@"
       return
       ;;
+    health)
+      shift
+      _hf=0; case "$*" in *--fresh*|*-f*) _hf=1;; esac
+      _ai_health_show claude "$_hf"
+      return
+      ;;
+    default)
+      shift; _ai_set_default claude "$@"; return
+      ;;
+    probe-model)
+      shift; _ai_set_probe_model claude "$@"; return
+      ;;
+    health-clear)
+      _ai_health_clear; echo "health cache cleared"; return
+      ;;
+    next)
+      arg="$(_ai_next_profile claude)"
+      ;;
   esac
 
   if [ -n "$arg" ]; then
     profile_json="$(_ai_profile_json claude "$arg")" || { echo "Unknown cc profile '$arg'. Add it to $AI_REGISTRY_PATH or run 'cc help'." >&2; return 1; }
   else
-    profile_json="$(_ai_profile_json claude "$(_ai_next_profile claude)")" || return 1
+    profile_json="$(_ai_profile_json claude "$(_ai_healthy_profile claude)")" || return 1
   fi
   name="$(_ai_profile_value "$profile_json" name "")"
   _ai_save_profile claude "$name" || return
@@ -1385,6 +1426,446 @@ codex() {
   else
     command codex "$@"
   fi
+}
+
+# ===================== health subsystem (mirrors ai-env.ps1) =====================
+# Real-wire probe (node https), TTL cache (~/.ai-env/health.json), on-demand.
+AI_HEALTH_PATH="${AI_CONFIG_DIR}/health.json"
+AI_HEALTH_TTL="${AI_HEALTH_TTL:-300}"
+AI_HEALTH_DEGRADED_MS="${AI_HEALTH_DEGRADED_MS:-6000}"
+AI_MCP_PATH="${AI_CONFIG_DIR}/mcp.toml"
+
+_ai_claude_json_path() { printf '%s\n' "${AI_CLAUDE_JSON_PATH:-$HOME/.claude.json}"; }
+_ai_codex_config_path() { printf '%s\n' "${AI_CODEX_CONFIG_PATH:-$HOME/.codex/config.toml}"; }
+
+# Probe a profile via a real wire request. Echoes JSON:
+# {"status","latencyMs","method","error"}. Never exports env.
+_ai_probe_health() {
+  local tool="$1" profile_json="$2"
+  _ai_require_node || return 1
+  node -e '
+const fs=require("fs"),https=require("https"),http=require("http"),{URL}=require("url");
+const tool=process.argv[1],P=JSON.parse(process.argv[2]),secretsPath=process.argv[3],router=process.argv[4];
+const degradedMs=Number(process.env.AI_HEALTH_DEGRADED_MS||6000);
+const out=(o)=>process.stdout.write(JSON.stringify(o));
+const mode=P.mode||"sub";
+if(mode!=="api")return out({status:"skip",latencyMs:0,method:null,error:"subscription mode (no remote probe)"});
+const parseSecrets=(file)=>{const s={};if(!fs.existsSync(file))return s;let c="";for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const t=line.trim();if(!t||t.startsWith("#"))continue;const sec=t.match(/^\[([^\]]+)\]\s*$/);if(sec){c=sec[1].trim();s[c]=s[c]||{};continue;}if(!c)continue;const m=t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(!m)continue;let v=m[2].trim();if(v.startsWith("\"")){const mm=v.match(/^"((?:\\.|[^"])*)"/);if(mm){try{v=JSON.parse(mm[0]);}catch{v=mm[1];}}}else if(v.startsWith("'\''")){const mm=v.match(/^'\''([^'\'']*)'\''/);if(mm)v=mm[1];}else v=v.replace(/\s+#.*$/,"").trim();s[c][m[1]]=v;}return s;};
+const expand=(x)=>!x?"":x.replace(/^~(?=\/|$)/,process.env.HOME||"");
+const tomlStr=(file,key)=>{if(!fs.existsSync(file))return"";const re=new RegExp("^\\s*"+key.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*=\\s*\"([^\"]*)\"");for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const m=line.match(re);if(m)return m[1];}return"";};
+const legacyEnv={};const legacy=expand(P.linux_secret||P.secret||"");if(legacy&&fs.existsSync(legacy)){for(const line of fs.readFileSync(legacy,"utf8").split(/\r?\n/)){const m=line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(m)legacyEnv[m[1]]=m[2].trim();}}
+const secrets=parseSecrets(secretsPath);const sid=P.secret_id||(tool+"."+P.name);const sec=secrets[sid]||{};
+let baseOrigin="",headers={},probeModel="",secretOk=false;
+if(tool==="claude"){probeModel=P.probe_model||"claude-3-5-haiku-20241022";let b=sec.ANTHROPIC_BASE_URL||legacyEnv.ANTHROPIC_BASE_URL||P.base_url||router;baseOrigin=b.replace(/\/+$/,"");const at=sec.ANTHROPIC_AUTH_TOKEN||legacyEnv.ANTHROPIC_AUTH_TOKEN||process.env.ANTHROPIC_AUTH_TOKEN||"";const ak=sec.ANTHROPIC_API_KEY||legacyEnv.ANTHROPIC_API_KEY||process.env.ANTHROPIC_API_KEY||"";headers={"anthropic-version":"2023-06-01"};if(at)headers["Authorization"]="Bearer "+at;if(ak)headers["x-api-key"]=ak;secretOk=!!(at||ak);
+}else{probeModel=P.probe_model||"gpt-5.4-mini";const profPath=expand((P.home||"~/.codex")+"/"+(P.codex_profile||P.profile||String(P.name||"").replace(":","-"))+".config.toml");let b=tomlStr(profPath,"base_url");if(!b)b=tomlStr(expand(P.home||"~/.codex")+"/config.toml","openai_base_url");if(!b)b="built-in OpenAI/ChatGPT endpoint";baseOrigin=b.replace(/\/+$/,"");const k=sec.OPENAI_API_KEY||sec.CODEX_API_KEY||legacyEnv.OPENAI_API_KEY||"";headers=k?{"Authorization":"Bearer "+k}:{};secretOk=!!k;}
+if(!baseOrigin||/^built-in/.test(baseOrigin))return out({status:"down",latencyMs:0,method:"none",error:"missing base_url"});
+if(!secretOk)return out({status:"down",latencyMs:0,method:"none",error:"missing credentials"});
+let urls=[];
+if(tool==="claude"){const apiBase=/\/v1$/.test(baseOrigin)?baseOrigin.replace(/\/v1$/,""):baseOrigin;urls.push(apiBase+"/v1/messages");}
+else{const hasVer=/\/v\d+$/.test(baseOrigin);const apiBase=hasVer?baseOrigin:baseOrigin+"/v1";urls.push(apiBase+"/responses");urls.push(apiBase+"/chat/completions");}
+const bodyFor=(u)=>u.endsWith("/responses")?JSON.stringify({model:probeModel,input:".",max_output_tokens:1}):JSON.stringify({model:probeModel,max_tokens:1,messages:[{role:"user",content:"."}]});
+const req=(u)=>new Promise((resolve)=>{const t0=Date.now();let done=false;const fin=(r)=>{if(!done){done=true;r.latencyMs=Date.now()-t0;resolve(r);}};const obj=new URL(u);const lib=obj.protocol==="http:"?http:https;const body=bodyFor(u);const r=lib.request(obj,{method:"POST",headers:{...headers,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)},timeout:20000},(res)=>{let d="";res.on("data",(c)=>d+=c);res.on("end",()=>fin({ok:res.statusCode>=200&&res.statusCode<300,code:res.statusCode,body:d}));});r.on("timeout",()=>{r.destroy();fin({ok:false,code:0,body:"",err:"timeout"});});r.on("error",(e)=>fin({ok:false,code:0,body:"",err:e.message}));r.write(body);r.end();});
+(async()=>{let lastErr=null,anyTransient=false;for(const u of urls){const r=await req(u);if(r.ok){let valid=true;try{const j=JSON.parse(r.body);if(u.endsWith("/messages"))valid=(Array.isArray(j.content)&&j.content.length>0)||j.type==="message";else if(u.endsWith("/responses"))valid=(Array.isArray(j.output)&&j.output.length>0)||j.output_text||j.status==="completed";else valid=Array.isArray(j.choices)&&j.choices.length>0;}catch{valid=false;}if(valid){const st=r.latencyMs>degradedMs?"degraded":"healthy";return out({status:st,latencyMs:r.latencyMs,method:"generation",error:null});}lastErr="200 but no generated content";}else{lastErr=r.code?("HTTP "+r.code):(r.err||"request failed");if(r.code===429||(r.code>=500&&r.code<600))anyTransient=true;}}
+if(anyTransient)return out({status:"degraded",latencyMs:0,method:"none",error:String(lastErr)+(anyTransient?" (transient)":"")});
+return out({status:"down",latencyMs:0,method:"none",error:String(lastErr)});
+})();
+' "$tool" "$profile_json" "$AI_SECRETS_PATH" "$CLAUDE_ROUTER_BASE_URL"
+}
+
+# Extract one field from a health-result JSON.
+_ai_health_field() { node -e 'const j=JSON.parse(process.argv[1]||"{}");process.stdout.write(String(j[process.argv[2]]??""));' "$1" "$2"; }
+
+# Read cached entry JSON for tool.name (empty if absent).
+_ai_health_read_entry() {
+  local tool="$1" name="$2"
+  [ -f "$AI_HEALTH_PATH" ] || return 0
+  node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const k=process.argv[2]+"."+process.argv[3];const e=j[k];if(e)process.stdout.write(JSON.stringify(e));' "$AI_HEALTH_PATH" "$tool" "$name"
+}
+_ai_health_store() {
+  local tool="$1" name="$2" result_json="$3"
+  mkdir -p "$AI_CONFIG_DIR"
+  node -e 'const fs=require("fs");const p=process.argv[1],tool=process.argv[2],name=process.argv[3],r=JSON.parse(process.argv[4]);let j={};try{j=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}j[tool+"."+name]=r;fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n");' "$AI_HEALTH_PATH" "$tool" "$name" "$result_json"
+}
+
+# TTL-cached probe. Echoes result JSON. $3=1 forces a fresh probe.
+_ai_health_cached() {
+  local tool="$1" profile_json="$2" fresh="${3:-0}" name result probed now stamped
+  name="$(_ai_profile_value "$profile_json" name "")"
+  if [ "$fresh" != "1" ]; then
+    result="$(_ai_health_read_entry "$tool" "$name")"
+    if [ -n "$result" ]; then
+      probed="$(_ai_health_field "$result" probedAt)"
+      now="$(node -e 'process.stdout.write(String(Math.floor(Date.now()/1000)))')"
+      if [ -n "$probed" ] && [ "$probed" -gt 0 ] && [ $((now - probed)) -lt "$AI_HEALTH_TTL" ]; then
+        printf '%s' "$result"; return 0
+      fi
+    fi
+  fi
+  result="$(_ai_probe_health "$tool" "$profile_json")"
+  stamped="$(node -e 'const r=JSON.parse(process.argv[1]);r.probedAt=Math.floor(Date.now()/1000);process.stdout.write(JSON.stringify(r));' "$result")"
+  _ai_health_store "$tool" "$name" "$stamped" 2>/dev/null || true
+  printf '%s' "$stamped"
+}
+
+_ai_health_cell() {
+  local result="$1" status code
+  [ -n "$result" ] || { printf '?'; return; }
+  status="$(_ai_health_field "$result" status)"
+  case "$status" in
+    healthy) printf '🟢%sms' "$(_ai_health_field "$result" latencyMs)";;
+    degraded) code="$(printf '%s' "$(_ai_health_field "$result" error)" | grep -oE 'HTTP [0-9]{3}' | head -1 | grep -oE '[0-9]{3}')"; printf '🟡%s' "${code:-slow}";;
+    down) code="$(printf '%s' "$(_ai_health_field "$result" error)" | grep -oE 'HTTP [0-9]{3}' | head -1 | grep -oE '[0-9]{3}')"; printf '🔴%s' "${code:-err}";;
+    skip) printf '⏭';;
+    *) printf '?';;
+  esac
+}
+_ai_health_cell_cached() {
+  local tool="$1" profile_json="$2" name result probed now
+  name="$(_ai_profile_value "$profile_json" name "")"
+  result="$(_ai_health_read_entry "$tool" "$name")"
+  [ -n "$result" ] || { printf '⏭'; return; }
+  probed="$(_ai_health_field "$result" probedAt)"
+  now="$(node -e 'process.stdout.write(String(Math.floor(Date.now()/1000)))')"
+  if [ -n "$probed" ] && [ "$probed" -gt 0 ] && [ $((now - probed)) -lt "$AI_HEALTH_TTL" ]; then
+    _ai_health_cell "$result"
+  else
+    printf '⏭'
+  fi
+}
+
+_ai_healthy_profile() {
+  local tool="$1" default ordered pj h st nm
+  default="$(_ai_default_profile "$tool")"
+  _ai_require_node || return 1
+  ordered="$(node -e '
+const fs=require("fs");const p=process.argv[1],tool=process.argv[2],def=process.argv[3];
+let r={};try{r=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
+const all=(r[tool]||[]).filter(x=>x.enabled!==false);
+const d=all.find(x=>String(x.name)===def);const rest=all.filter(x=>String(x.name)!==def);
+const out=d?[d,...rest]:rest;
+for(const x of out)console.log(JSON.stringify(x));
+' "$AI_REGISTRY_PATH" "$tool" "$default")" || return 1
+  while IFS= read -r pj; do
+    [ -n "$pj" ] || continue
+    h="$(_ai_health_cached "$tool" "$pj" 0)"
+    st="$(_ai_health_field "$h" status)"
+    if [ "$st" != "down" ]; then _ai_profile_value "$pj" name ""; return; fi
+  done <<<"$ordered"
+  printf '%s\n' "$default"
+}
+
+_ai_set_probe_model() {
+  local tool="$1"; shift
+  local parsed name model
+  parsed="$(_ai_parse_management_args "$@")" || return
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  [ -n "$name" ] || { echo "Usage: probe-model <name> [model]  (omit model to clear)" >&2; return 1; }
+  model="$(_ai_mgmt_positional "$parsed" 1)"
+  _ai_profile_json "$tool" "$name" >/dev/null || { echo "$tool profile '$name' not found." >&2; return 1; }
+  local res
+  res="$(node -e '
+const fs=require("fs");const p=process.argv[1],tool=process.argv[2],query=String(process.argv[3]).toLowerCase(),model=process.argv[4];
+let r={};try{r=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
+for(const x of r[tool]||[]){const names=[x.name,...(x.aliases||[])].filter(Boolean).map(s=>String(s).toLowerCase());if(names.includes(query)){if(model)x.probe_model=model;else if(x.probe_model)delete x.probe_model;fs.writeFileSync(p,JSON.stringify(r,null,2)+"\n");process.stdout.write(x.name+"\t"+(model?"set":"clear"));process.exit(0);}}
+process.exit(1);
+' "$AI_REGISTRY_PATH" "$tool" "$name" "$model")" || { echo "$tool profile '$name' not found." >&2; return 1; }
+  local pname act; pname="${res%%	*}"; act="${res#*	}"
+  if [ "$act" = "set" ]; then echo "Set $tool '$pname' probe_model = $model"; else echo "Cleared $tool '$pname' probe_model (back to default)"; fi
+}
+
+_ai_set_default() {
+  local tool="$1"; shift
+  local parsed name cur
+  parsed="$(_ai_parse_management_args "$@")" || return
+  cur="$(_ai_default_profile "$tool")"
+  name="$(_ai_mgmt_positional "$parsed" 0)"
+  if [ -z "$name" ]; then echo "$tool default = $cur"; return; fi
+  _ai_profile_json "$tool" "$name" >/dev/null || { echo "Unknown $tool profile '$name'." >&2; return 1; }
+  node -e '
+const fs=require("fs");const p=process.argv[1],tool=process.argv[2],name=process.argv[3];
+let r={};try{r=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
+r.defaults=r.defaults||{};r.defaults[tool]=name;fs.writeFileSync(p,JSON.stringify(r,null,2)+"\n");
+' "$AI_REGISTRY_PATH" "$tool" "$name"
+  echo "Set $tool default = $name"
+}
+
+_ai_health_clear() { rm -f "$AI_HEALTH_PATH"; }
+_ai_health_sync_cache() {
+  local tool="$1"
+  [ -f "$AI_HEALTH_PATH" ] || return 0
+  node -e '
+const fs=require("fs");const hp=process.argv[1],tool=process.argv[2],rp=process.argv[3];
+let r={};try{r=JSON.parse(fs.readFileSync(rp,"utf8"));}catch{}
+const valid=new Set((r[tool]||[]).filter(x=>x.enabled!==false).map(x=>tool+"."+x.name));
+let j={};try{j=JSON.parse(fs.readFileSync(hp,"utf8"));}catch{}
+let changed=false;
+for(const k of Object.keys(j)){if(k.startsWith(tool+".")&&!valid.has(k)){delete j[k];changed=true;}}
+if(changed)fs.writeFileSync(hp,JSON.stringify(j,null,2)+"\n");
+' "$AI_HEALTH_PATH" "$tool" "$AI_REGISTRY_PATH"
+}
+
+_ai_health_show() {
+  local tool="$1" fresh="${2:-0}" saved label nm h cell method err sel pj
+  _ai_health_sync_cache "$tool"
+  [ "$tool" = codex ] && label="Codex" || label="Claude Code"
+  echo "$label profile health ($AI_REGISTRY_PATH):"
+  saved="$(_ai_saved_profile "$tool")"
+  _ai_require_node || return 1
+  node -e '
+const fs=require("fs");const p=process.argv[1],tool=process.argv[2];
+let r={};try{r=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
+for(const x of r[tool]||[])console.log(JSON.stringify(x));
+' "$AI_REGISTRY_PATH" "$tool" | while IFS= read -r pj; do
+    [ -n "$pj" ] || continue
+    nm="$(_ai_profile_value "$pj" name "")"
+    h="$(_ai_health_cached "$tool" "$pj" "$fresh")"
+    cell="$(_ai_health_cell "$h")"
+    method="$(_ai_health_field "$h" method)"; [ -n "$method" ] || method="-"
+    err="$(_ai_health_field "$h" error)"
+    [ "$nm" = "$saved" ] && sel="*" || sel=" "
+    printf '%s %-14s %-10s %-12s %s\n' "$sel" "$nm" "$cell" "$method" "$err"
+  done
+  echo "  (health $( [ "$fresh" = 1 ] && echo 're-probed (fresh)' || echo 'cached <=5min'); ${tool} health --fresh re-probe, ${tool} health-clear clears)"
+}
+
+_ai_health_status_line() {
+  local tool="$1" profile_json="$2" h cell err
+  h="$(_ai_health_cached "$tool" "$profile_json" 0)"
+  cell="$(_ai_health_cell "$h")"
+  err="$(_ai_health_field "$h" error)"
+  [ -n "$err" ] && err="  $err"
+  printf '  Health: %s%s\n' "$cell" "$err"
+}
+
+# ===================== MCP module (mirrors ai-env.ps1) =====================
+# ~/.ai-env/mcp.toml is the SSOT. `mcp sync` pushes to global targets:
+#   Claude -> ~/.claude.json mcpServers (node JSON merge, atomic)
+#   Codex  -> ~/.codex/config.toml [mcp_servers.NAME] (block edit)
+
+# entry json -> [mcp.NAME] TOML block
+_ai_mcp_toml_block() {
+  node -e '
+const e=JSON.parse(process.argv[1]);
+const L=["[mcp."+e.name+"]"];
+if(e.kind==="http"){L.push("url = \""+(e.url||"")+"\"");}
+else{const cmd=(e.command||[]).map(x=>"\""+String(x)+"\"").join(", ");L.push("command = ["+cmd+"]");const env=e.env||{};const ks=Object.keys(env);if(ks.length)L.push("env = { "+ks.map(k=>k+" = \""+env[k]+"\"").join(", ")+" }");}
+L.push("sync = ["+(e.sync||[]).map(x=>"\""+x+"\"").join(", ")+"]");
+L.push("enabled = "+(e.enabled?"true":"false"));
+process.stdout.write(L.join("\n"));
+' "$1"
+}
+# read mcp.toml -> one entry JSON per line
+_ai_mcp_read() {
+  [ -f "$AI_MCP_PATH" ] || return 0
+  node -e '
+const fs=require("fs");
+const pval=(raw)=>{const v=String(raw||"").trim();if(v.startsWith("\"")){const m=v.match(/^"((?:\\.|[^"])*)"/);if(m){try{return JSON.parse(m[0]);}catch{return m[1];}}}return v.replace(/\s+#.*$/,"").trim();};
+const parr=(raw)=>{const o=[];for(const m of String(raw||"").matchAll(/"((?:\\.|[^"])*)"/g))o.push(m[1]);return o;};
+const ptbl=(raw)=>{const h={};for(const m of String(raw||"").matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:\\.|[^"])*)"/g))h[m[1]]=m[2];return h;};
+let cur=null;const r={};
+for(const line of fs.readFileSync(process.argv[1],"utf8").split(/\r?\n/)){const t=line.trim();if(!t||t.startsWith("#"))continue;const sec=t.match(/^\[mcp\.([^\]]+)\]\s*$/);if(sec){cur=sec[1].trim();r[cur]={name:cur,kind:"stdio",command:[],url:null,env:{},sync:["claude","codex"],enabled:true};continue;}if(/^\[/.test(t)){cur=null;continue;}if(!cur)continue;const m=t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(!m)continue;const k=m[1],raw=m[2].trim(),e=r[cur];if(k==="command"){e.kind="stdio";e.command=parr(raw);}else if(k==="url"){e.kind="http";e.url=pval(raw);}else if(k==="env"){e.env=ptbl(raw);}else if(k==="sync"){e.sync=parr(raw);}else if(k==="enabled"){e.enabled=/true/.test(raw);}}
+for(const n of Object.keys(r))console.log(JSON.stringify(r[n]));
+' "$AI_MCP_PATH"
+}
+
+# Claude target upsert/remove. $2=entryJson (empty=remove)
+_ai_mcp_claude_set() {
+  local name="$1" entry="$2" p bak tmp
+  p="$(_ai_claude_json_path)"; bak="$p.aienv.bak"; tmp="$p.tmp"
+  [ -f "$p" ] && [ ! -f "$bak" ] && cp "$p" "$bak" 2>/dev/null || true
+  node -e '
+const fs=require("fs");const p=process.argv[1],tmp=process.argv[2],name=process.argv[3],hasE=process.argv[4]==="1",entry=process.argv[5];
+let d={};try{if(fs.existsSync(p))d=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
+const ms={};if(d.mcpServers&&typeof d.mcpServers==="object")for(const k of Object.keys(d.mcpServers))ms[k]=d.mcpServers[k];
+if(hasE){const e=JSON.parse(entry);const o={};if(e.kind==="http"){o.type="http";o.url=e.url;}else{if(Array.isArray(e.command)&&e.command.length)o.command=String(e.command[0]);o.args=Array.isArray(e.command)&&e.command.length>1?e.command.slice(1):[];if(e.env&&Object.keys(e.env).length)o.env=e.env;}ms[name]=o;}else if(ms[name]){delete ms[name];}
+d.mcpServers=ms;fs.writeFileSync(tmp,JSON.stringify(d,null,2));
+' "$p" "$tmp" "$name" "$([ -n "$entry" ] && echo 1 || echo 0)" "$entry"
+  mv "$tmp" "$p"
+}
+# Codex target upsert/remove. $2=TOML block (empty=remove)
+_ai_mcp_codex_set() {
+  local name="$1" block="$2" p header out
+  p="$(_ai_codex_config_path)"; header="[mcp_servers.$name]"
+  if [ ! -f "$p" ]; then
+    [ -z "$block" ] && return 0
+    mkdir -p "$(dirname "$p")"; : >"$p"
+  fi
+  out="$(awk -v h="$header" '
+    { line=$0; sub(/^[ \t]+/,"",line); sub(/[ \t]+$/,"",line);
+      if (line ~ /^\[/) { skip = (line == h) ? 1 : 0 }
+      if (!skip) print
+    }
+  ' "$p")"
+  if [ -n "$block" ]; then
+    [ -n "$out" ] && out="$out"$'\n\n'
+    out="$out$block"
+  fi
+  printf '%s\n' "$out" >"$p"
+}
+
+_ai_claude_mcp_names() {
+  local p; p="$(_ai_claude_json_path)"
+  [ -f "$p" ] || return 0
+  node -e 'const fs=require("fs");try{const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(d.mcpServers)for(const k of Object.keys(d.mcpServers))console.log(k);}catch{}' "$p"
+}
+_ai_codex_mcp_test() {
+  local p; p="$(_ai_codex_config_path)"
+  [ -f "$p" ] || return 1
+  grep -qE "^\[mcp_servers\.$(printf '%s' "$1" | sed 's/[][\.*/^$[]/\\&/g')\]" "$p"
+}
+
+_ai_mcp_sync() {
+  local count; count="$(_ai_mcp_read | wc -l | tr -d ' ')"
+  if [ "$count" -eq 0 ]; then echo "No MCP servers in $AI_MCP_PATH. Run 'mcp edit'."; return; fi
+  local entry name kind want cblock ups=0 rem=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    name="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).name)' "$entry")"
+    want="$(node -e 'const e=JSON.parse(process.argv[1]);process.stdout.write((e.enabled&&e.sync&&e.sync.indexOf("claude")>=0)?"1":"0")' "$entry")"
+    if [ "$want" = "1" ]; then _ai_mcp_claude_set "$name" "$entry"; ups=$((ups+1)); else _ai_mcp_claude_set "$name" ""; rem=$((rem+1)); fi
+    want="$(node -e 'const e=JSON.parse(process.argv[1]);process.stdout.write((e.enabled&&e.sync&&e.sync.indexOf("codex")>=0)?"1":"0")' "$entry")"
+    if [ "$want" = "1" ]; then
+      cblock="$(_ai_mcp_codex_block_for_entry "$entry")"; _ai_mcp_codex_set "$name" "$cblock"; ups=$((ups+1))
+    else
+      _ai_mcp_codex_set "$name" ""; rem=$((rem+1))
+    fi
+  done < <(_ai_mcp_read)
+  echo "MCP sync done: $ups upsert(s), $rem remove(s). Targets: Claude ($(_ai_claude_json_path)), Codex ($(_ai_codex_config_path))."
+}
+# entry json -> codex [mcp_servers.NAME] block
+_ai_mcp_codex_block_for_entry() {
+  node -e '
+const e=JSON.parse(process.argv[1]);const L=["[mcp_servers."+e.name+"]"];
+if(e.kind==="http"){L.push("url = \""+(e.url||"")+"\"");}
+else{const cmd=(e.command||[]).map(x=>"\""+String(x)+"\"").join(", ");L.push("command = ["+cmd+"]");const env=e.env||{};const ks=Object.keys(env);if(ks.length)L.push("env = { "+ks.map(k=>k+" = \""+env[k]+"\"").join(", ")+" }");}
+L.push("enabled = "+(e.enabled?"true":"false"));
+process.stdout.write(L.join("\n"));
+' "$1"
+}
+
+_ai_mcp_list() {
+  local count; count="$(_ai_mcp_read | wc -l | tr -d ' ')"
+  if [ "$count" -eq 0 ]; then echo "No MCP servers in $AI_MCP_PATH. Run 'mcp edit'."; return; fi
+  local entry name kind enabled sync cc cx
+  printf '%-16s %-7s %-8s %-8s %-8s %s\n' Name Type Claude Codex Enabled Sync
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    name="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).name)' "$entry")"
+    kind="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).kind)' "$entry")"
+    enabled="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).enabled?"on":"off")' "$entry")"
+    sync="$(node -e 'process.stdout.write((JSON.parse(process.argv[1]).sync||[]).join(","))' "$entry")"
+    cc="-"; _ai_claude_mcp_names | grep -qxF "$name" && cc="yes"
+    cx="-"; _ai_codex_mcp_test "$name" && cx="yes"
+    printf '%-16s %-7s %-8s %-8s %-8s %s\n' "$name" "$kind" "$cc" "$cx" "$enabled" "$sync"
+  done < <(_ai_mcp_read)
+  echo "  (yes = present in target; run 'mcp sync' to align)"
+}
+_ai_mcp_get() {
+  local name="$1" entry
+  [ -n "$name" ] || { echo "Usage: mcp get NAME"; return; }
+  entry="$(_ai_mcp_read | node -e 'const n=process.argv[1];let r="";for(let line of (require("fs").readFileSync(0,"utf8").split(/\r?\n/))){try{const e=JSON.parse(line);if(e.name===n){r=JSON.stringify(e);break;}}catch{}}process.stdout.write(r);' "$name")"
+  [ -n "$entry" ] || { echo "No MCP server '$name' in mcp.toml."; return; }
+  node -e '
+const e=JSON.parse(process.argv[1]);console.log("mcp."+e.name+":");console.log("  kind    : "+e.kind);
+if(e.kind==="http")console.log("  url     : "+e.url);else console.log("  command : "+(e.command||[]).join(" "));
+const env=e.env||{};const ks=Object.keys(env);if(ks.length)console.log("  env     : "+ks.map(k=>k+"="+env[k]).join(", "));
+console.log("  sync    : "+(e.sync||[]).join(", "));console.log("  enabled : "+e.enabled);
+' "$entry"
+  local cc="-" cx="-"
+  _ai_claude_mcp_names | grep -qxF "$name" && cc="present"
+  _ai_codex_mcp_test "$name" && cx="present"
+  echo "  claude  : $cc"; echo "  codex   : $cx"
+}
+_ai_mcp_edit() {
+  if [ ! -f "$AI_MCP_PATH" ]; then
+    mkdir -p "$AI_CONFIG_DIR"
+    cat >"$AI_MCP_PATH" <<'TOML'
+# ~/.ai-env/mcp.toml - single source of truth for MCP servers (Claude Code + Codex).
+# `mcp sync` pushes each enabled server to global targets:
+#   Claude -> ~/.claude.json mcpServers
+#   Codex  -> ~/.codex/config.toml [mcp_servers.NAME]
+# A server is EITHER stdio (command = [...]) OR http (url = "...").
+# sync = which tools (omit = both). enabled = false keeps it defined but skips it.
+
+# [mcp.context7]
+# command = ["npx", "-y", "@upstash/context7-mcp"]
+# env = {}
+# sync = ["claude", "codex"]
+# enabled = true
+TOML
+    echo "Created starter mcp.toml at $AI_MCP_PATH"
+  fi
+  local ed="${EDITOR:-${VISUAL:-}}"
+  [ -n "$ed" ] || ed="$(command -v cursor || command -v code || echo vi)"
+  # strip --wait/-w so mcp edit opens and returns (non-blocking)
+  local cmd rest
+  cmd="$(printf '%s' "$ed" | awk '{for(i=1;i<=NF;i++)if($i!="--wait"&&$i!="-w")printf "%s%s",$i,(i<NF?" ":"");print""}' | awk '{print $1}')"
+  echo "Opening $AI_MCP_PATH with $cmd ..."
+  ( "$cmd" "$AI_MCP_PATH" >/dev/null 2>&1 & ) 2>/dev/null || command "$ed" "$AI_MCP_PATH" >/dev/null 2>&1 &
+}
+_ai_mcp_pull() {
+  local name="${1:-}" cp cj cx existing added=0 skipped=0 newblocks=""
+  # existing mcp.toml names
+  existing="$(_ai_mcp_read | node -e 'for(let l of require("fs").readFileSync(0,"utf8").split(/\r?\n/)){try{console.log(JSON.parse(l).name);}catch{}}')"
+  # claude mcpServers
+  cp="$(_ai_claude_json_path)"
+  cj="$(node -e 'const fs=require("fs");try{const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const m=d.mcpServers||{};for(const k of Object.keys(m)){const e=m[k];const o={name:k,kind:"stdio",command:[],url:null,env:{},sync:["claude"],enabled:true};if(e.type==="http"||e.type==="sse"||e.url){o.kind="http";o.url=e.url;}else{const c=[];if(e.command){if(Array.isArray(e.command))c.push(...e.command);else c.push(String(e.command));}if(Array.isArray(e.args))c.push(...e.args);o.command=c;if(e.env&&typeof e.env==="object")o.env=e.env;}console.log(JSON.stringify(o));}}catch{}' "$cp")"
+  # codex mcp_servers
+  xp="$(_ai_codex_config_path)"
+  xj="$(node -e 'const fs=require("fs");const p=process.argv[1];if(!fs.existsSync(p)){process.exit(0);}let cur=null;const r={};for(const line of fs.readFileSync(p,"utf8").split(/\r?\n/)){const t=line.trim();if(!t||t.startsWith("#"))continue;const s=t.match(/^\[mcp_servers\.([^\]]+)\]\s*$/);if(s){cur=s[1].trim();r[cur]={name:cur,command:[],url:null,env:{},enabled:true};continue;}if(/^\[/.test(t)){cur=null;continue;}if(!cur)continue;const m=t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(!m)continue;const k=m[1],raw=m[2].trim();const e=r[cur];if(k==="command"){const arr=[];for(const mm of raw.matchAll(/"((?:\\.|[^"])*)"/g))arr.push(mm[1]);e.command=arr;}else if(k==="url"){e.url=raw.replace(/^"|"$/g,"");e.kind="http";}else if(k==="enabled"){e.enabled=/true/.test(raw);}}for(const n of Object.keys(r)){const e=r[n];const o={name:n,kind:e.url?"http":"stdio",command:e.command||[],url:e.url,env:{},sync:["codex"],enabled:e.enabled};console.log(JSON.stringify(o));}' "$xp")"
+  # merge: for each unique name in cj+xj
+  local all
+  all="$(printf '%s\n%s\n' "$cj" "$xj" | node -e '
+const lines=require("fs").readFileSync(0,"utf8").split(/\r?\n/);
+const byName={};
+for(const l of lines){if(!l.trim())continue;try{const e=JSON.parse(l);if(!byName[e.name])byName[e.name]={e:e,sync:new Set()};byName[e.name].sync.add(e.sync[0]);}catch{}}
+for(const n of Object.keys(byName)){const x=byName[n];x.e.sync=Array.from(x.sync);console.log(JSON.stringify(x.e));}
+')"
+  if [ -n "$name" ]; then
+    all="$(printf '%s\n' "$all" | node -e 'const n=process.argv[1];for(const l of require("fs").readFileSync(0,"utf8").split(/\r?\n/)){try{const e=JSON.parse(l);if(e.name===n){console.log(JSON.stringify(e));break;}}catch{}}' "$name")"
+    [ -n "$all" ] || { echo "'$name' not found in Claude or Codex targets."; return; }
+  fi
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    en="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).name)' "$e")"
+    if printf '%s\n' "$existing" | grep -qxF "$en"; then skipped=$((skipped+1)); continue; fi
+    newblocks="$newblocks"$'\n\n'"$(_ai_mcp_toml_block "$e")"
+    added=$((added+1))
+  done <<<"$all"
+  if [ "$added" -gt 0 ]; then
+    if [ ! -f "$AI_MCP_PATH" ]; then mkdir -p "$AI_CONFIG_DIR"; printf '# ~/.ai-env/mcp.toml - pulled from Claude Code & Codex. Edit freely; run mcp sync to push back.\n' >"$AI_MCP_PATH"; fi
+    { [ -s "$AI_MCP_PATH" ] && printf '\n'; printf '%s\n' "${newblocks#$'\n\n'}"; } >>"$AI_MCP_PATH"
+  fi
+  echo "MCP pull: +$added added, $skipped skipped (already in mcp.toml). -> $AI_MCP_PATH"
+}
+
+mcp() {
+  local arg="${1:-}"
+  case "$arg" in
+    ""|help|-h|--help)
+      cat <<'EOF'
+mcp - manage MCP servers across Claude Code & Codex from ~/.ai-env/mcp.toml
+
+Usage:
+  mcp                 Show this help
+  mcp list            List servers + whether each target has them
+  mcp edit            Open mcp.toml in EDITOR (creates a starter if absent)
+  mcp sync            Push mcp.toml -> Claude (~/.claude.json) & Codex (~/.codex/config.toml)
+  mcp pull [NAME]     Import existing MCP servers FROM Claude & Codex into mcp.toml
+  mcp get NAME        Show one server's config + target status
+
+mcp.toml is the single source of truth; edit it, then `mcp sync` (idempotent).
+enabled = false keeps a server defined but skips it on sync.
+sync = ["claude"] or ["codex"] limits a server to one tool (omit = both).
+EOF
+      ;;
+    list) _ai_mcp_list ;;
+    edit) _ai_mcp_edit ;;
+    sync) _ai_mcp_sync ;;
+    pull|import) shift; _ai_mcp_pull "$@" ;;
+    get|show) _ai_mcp_get "${2:-}" ;;
+    *) echo "Unknown mcp command '$arg'." >&2; return 1 ;;
+  esac
 }
 
 _ai_init_saved_profiles() {

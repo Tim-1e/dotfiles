@@ -69,10 +69,10 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-envtoken"
 
   if ($cxHelp -notmatch "cx - switch Codex state") { throw "cx help output missing header" }
   if ($cxList -notmatch "Codex profiles") { throw "cx list output missing header" }
-  if ($cxList -notmatch "secrets\.toml#codex\.api") { throw "cx list did not report TOML secret source" }
+  if ($cxList -notmatch "Health") { throw "cx list missing Health column" }
   if ($ccHelp -notmatch "cc - switch Claude Code state") { throw "cc help output missing header" }
   if ($ccList -notmatch "Claude Code profiles") { throw "cc list output missing header" }
-  if ($ccList -notmatch "secrets\.toml#claude\.api-docker") { throw "cc list did not report TOML secret source" }
+  if ($ccList -notmatch "Health") { throw "cc list missing Health column" }
   if ($cxStats -notmatch "Codex local token stats") { throw "cx stats output missing header" }
   if ($cxStats -notmatch "Total:\s+1\.2K \(1200\)") { throw "cx stats did not summarize fixture tokens" }
   if ($cxHelp -notmatch "cx add-api NAME") { throw "cx help output missing add-api" }

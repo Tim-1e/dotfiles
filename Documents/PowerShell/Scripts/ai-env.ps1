@@ -1114,6 +1114,341 @@ function Set-ClaudeProfileEnvironment {
   return $secretSource
 }
 
+# Join an origin and a relative path into a URL (no double slashes).
+function Join-Path-Uri {
+  param([Parameter(Mandatory = $true)][string]$Origin, [Parameter(Mandatory = $true)][string]$Relative)
+  $o = $Origin.TrimEnd('/')
+  $r = $Relative.TrimStart('/')
+  return "$o/$r"
+}
+
+# Returns probe target (base origin + auth headers) for a profile WITHOUT
+# mutating $env:. Used by Get-AiProfileHealth so a `cc list` check never
+# disturbs the current shell session.
+function Get-AiProfileProbeTarget {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile
+  )
+
+  $result = [pscustomobject]@{
+    BaseOrigin  = $null
+    Headers     = @{}
+    ProbeModel  = $null
+    SecretOk    = $false
+    SecretLabel = "<none>"
+  }
+
+  $mode = Get-AiProfileMode -Profile $Profile
+  if ($mode -ne "api") {
+    return $result
+  }
+
+  $secretId = Get-AiSecretId -Tool $Tool -Profile $Profile
+  $section = Get-AiTomlSecretSection -SecretId $secretId
+  $legacyPath = Get-AiSecretPath -Profile $Profile
+
+  if ($Tool -eq "claude") {
+    $baseUrl = $null
+    if ($section.ContainsKey("ANTHROPIC_BASE_URL") -and $section["ANTHROPIC_BASE_URL"]) {
+      $baseUrl = [string]$section["ANTHROPIC_BASE_URL"]
+    } elseif ($legacyPath -and (Test-Path -LiteralPath $legacyPath)) {
+      $baseUrl = Get-PowerShellEnvAssignment -Path $legacyPath -Name "ANTHROPIC_BASE_URL"
+    }
+    if (-not $baseUrl) {
+      $baseUrl = [string](Get-AiProperty -Object $Profile -Name "base_url" -Default $script:ClaudeRouterBaseUrl)
+    }
+
+    $authToken = $null
+    $apiKey = $null
+    if ($section.ContainsKey("ANTHROPIC_AUTH_TOKEN") -and $section["ANTHROPIC_AUTH_TOKEN"]) {
+      $authToken = [string]$section["ANTHROPIC_AUTH_TOKEN"]
+    }
+    if ($section.ContainsKey("ANTHROPIC_API_KEY") -and $section["ANTHROPIC_API_KEY"]) {
+      $apiKey = [string]$section["ANTHROPIC_API_KEY"]
+    }
+    if (-not $authToken -and -not $apiKey -and $legacyPath -and (Test-Path -LiteralPath $legacyPath)) {
+      $authToken = Get-PowerShellEnvAssignment -Path $legacyPath -Name "ANTHROPIC_AUTH_TOKEN"
+      $apiKey = Get-PowerShellEnvAssignment -Path $legacyPath -Name "ANTHROPIC_API_KEY"
+    }
+    if (-not $authToken) { $authToken = [Environment]::GetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "User") }
+    if (-not $apiKey) { $apiKey = [Environment]::GetEnvironmentVariable("ANTHROPIC_API_KEY", "User") }
+
+    $headers = @{ "anthropic-version" = "2023-06-01" }
+    if ($authToken) { $headers["Authorization"] = "Bearer $authToken" }
+    if ($apiKey) { $headers["x-api-key"] = $apiKey }
+
+    $result.BaseOrigin = $baseUrl
+    $result.Headers = $headers
+    $result.SecretOk = [bool]($authToken -or $apiKey)
+    $result.SecretLabel = if ($result.SecretOk) { "$script:AiSecretsPath#$secretId" } else { "<none>" }
+    $result.ProbeModel = [string](Get-AiProperty -Object $Profile -Name "probe_model" -Default "claude-3-5-haiku-20241022")
+    return $result
+  }
+
+  # codex
+  $apiKey = $null
+  if ($section.ContainsKey("OPENAI_API_KEY") -and $section["OPENAI_API_KEY"]) {
+    $apiKey = [string]$section["OPENAI_API_KEY"]
+  }
+  if (-not $apiKey -and $section.ContainsKey("CODEX_API_KEY") -and $section["CODEX_API_KEY"]) {
+    $apiKey = [string]$section["CODEX_API_KEY"]
+  }
+  if (-not $apiKey -and $legacyPath -and (Test-Path -LiteralPath $legacyPath)) {
+    $apiKey = Get-PowerShellEnvAssignment -Path $legacyPath -Name "OPENAI_API_KEY"
+  }
+  if (-not $apiKey) { $apiKey = Get-LegacyCodexApiKey }
+
+  $result.BaseOrigin = (Get-CodexBaseUrl -Profile $Profile)
+  $result.Headers = if ($apiKey) { @{ "Authorization" = "Bearer $apiKey" } } else { @{} }
+  $result.SecretOk = [bool]$apiKey
+  $result.SecretLabel = if ($apiKey) { "$script:AiSecretsPath#$secretId" } else { "<none>" }
+
+  # Probe with a cheap model by default (low cost + low latency). A profile may
+  # override via `probe_model` — required for provider-specific namespaces that
+  # do not serve GPT models (e.g. GLM -> set probe_model = "glm-4.5-flash").
+  $result.ProbeModel = [string](Get-AiProperty -Object $Profile -Name "probe_model" -Default "gpt-5.4-mini")
+  return $result
+}
+
+# Probe a profile by issuing a real (cheap/free) API request and measuring
+# latency. Returns: Status = healthy | degraded | down | skip; LatencyMs; Error.
+#   Claude: GET {base}/v1/models (free), fall back to POST /v1/messages (1 token)
+#   Codex:  GET {base}/v1/models (free)
+# Never mutates the current process environment.
+function Get-AiProfileHealth {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile,
+    [int]$TimeoutSec = 20,
+    [int]$DegradedMs = 6000
+  )
+
+  $mode = Get-AiProfileMode -Profile $Profile
+  if ($mode -ne "api") {
+    return [pscustomobject]@{ Status = "skip"; LatencyMs = 0; Error = "subscription mode (no remote probe)" }
+  }
+
+  $target = Get-AiProfileProbeTarget -Tool $Tool -Profile $Profile
+  if (-not $target.BaseOrigin) {
+    return [pscustomobject]@{ Status = "down"; LatencyMs = 0; Error = "missing base_url" }
+  }
+  if (-not $target.SecretOk) {
+    return [pscustomobject]@{ Status = "down"; LatencyMs = 0; Error = "missing credentials" }
+  }
+
+  $origin = [string]$target.BaseOrigin
+  $origin = $origin.TrimEnd('/')
+
+  # Probe the REAL wire path each tool uses (not /models — that hides real
+  # failures like a relay that answers /models but 404s on /responses).
+  #   Claude: POST /v1/messages  (Claude Code always uses the Messages API)
+  #   Codex:  POST /responses AND /chat/completions  (the two wire_api variants)
+  $candidates = @()
+  if ($Tool -eq "claude") {
+    $apiBase = if ($origin -match '/v1$') { ($origin -replace '/v1$', '') } else { $origin }
+    $candidates += @{
+      Label = "messages"
+      Url   = Join-Path-Uri $apiBase "v1/messages"
+      Body  = @{ model = $target.ProbeModel; max_tokens = 1; messages = @(@{ role = "user"; content = "." }) } |
+        ConvertTo-Json -Depth 5 -Compress
+      Check = "messages"
+    }
+  } else {
+    $hasVersion    = $origin -match '/v\d+$'
+    $responsesRel  = if ($hasVersion) { "responses" } else { "v1/responses" }
+    $chatRel       = if ($hasVersion) { "chat/completions" } else { "v1/chat/completions" }
+    $model         = if ($target.ProbeModel) { $target.ProbeModel } else { "probe" }
+    $candidates += @{
+      Label = "responses"
+      Url   = Join-Path-Uri $origin $responsesRel
+      Body  = @{ model = $model; input = "."; max_output_tokens = 1 } | ConvertTo-Json -Depth 5 -Compress
+      Check = "responses"
+    }
+    $candidates += @{
+      Label = "chat"
+      Url   = Join-Path-Uri $origin $chatRel
+      Body  = @{ model = $model; max_tokens = 1; messages = @(@{ role = "user"; content = "." }) } |
+        ConvertTo-Json -Depth 5 -Compress
+      Check = "chat"
+    }
+  }
+
+  # Run each candidate; record the real HTTP result + whether the body carried
+  # actual generated output (not just a 200).
+  $results = @{}
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  foreach ($c in $candidates) {
+    $sw.Restart()
+    $r = [pscustomobject]@{ Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
+    try {
+      $resp = Invoke-WebRequest -Uri $c.Url -Method Post -Headers $target.Headers -Body $c.Body `
+        -ContentType "application/json" -TimeoutSec $TimeoutSec -ErrorAction Stop
+      $sw.Stop()
+      $r.Code = [int]$resp.StatusCode
+      $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+      if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) {
+        $valid = $false
+        try {
+          $j = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+          switch ($c.Check) {
+            "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
+            "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
+            "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
+          }
+        } catch { $r.Detail = "200 but unparseable body" }
+        $r.Ok = $valid
+        if (-not $valid -and -not $r.Detail) { $r.Detail = "200 but no generated content" }
+      } else {
+        $r.Detail = "HTTP $($resp.StatusCode)"
+      }
+    } catch {
+      $sw.Stop()
+      $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+      if ($_.Exception.Response) {
+        $r.Code = [int]$_.Exception.Response.StatusCode
+        $r.Detail = "HTTP $($r.Code)"
+      } else {
+        $r.Detail = $_.Exception.Message
+      }
+    }
+    $results[$c.Label] = $r
+  }
+
+  # Claude: single endpoint decides.
+  if ($Tool -eq "claude") {
+    $m = $results["messages"]
+    if ($m.Ok) {
+      $st = if ($m.LatencyMs -gt $DegradedMs) { "degraded" } else { "healthy" }
+      return [pscustomobject]@{ Status = $st; LatencyMs = $m.LatencyMs; Method = "generation"; Error = $null }
+    }
+    # 429/5xx are transient (relay alive but throttled/overloaded) -> degraded;
+    # 401/403/404 etc. are real failures -> down.
+    if ($m.Code -eq 429 -or ($m.Code -ge 500 -and $m.Code -lt 600)) {
+      return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $m.Detail + " (transient)") }
+    }
+    return [pscustomobject]@{ Status = "down"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $m.Detail) }
+  }
+
+  # Codex: verdict = the endpoint matching the configured wire_api.
+  $cfgPath = Get-CodexProfilePath -Profile $Profile
+  $wireApi = $null
+  if ($cfgPath -and (Test-Path -LiteralPath $cfgPath)) {
+    $wireApi = Get-TomlStringValue -Path $cfgPath -Key "wire_api"
+  }
+  $effLabel = if ($wireApi -and $wireApi -match "chat") { "chat" } else { "responses" }
+  $altLabel = if ($effLabel -eq "chat") { "responses" } else { "chat" }
+  $eff = $results[$effLabel]
+  $alt = $results[$altLabel]
+
+  if ($eff.Ok) {
+    $st = if ($eff.LatencyMs -gt $DegradedMs) { "degraded" } else { "healthy" }
+    return [pscustomobject]@{ Status = $st; LatencyMs = $eff.LatencyMs; Method = "generation:$effLabel"; Error = $null }
+  }
+
+  # The configured wire fails. If the other wire works, it's fixable -> degraded
+  # with an actionable note; otherwise check transient vs real failure.
+  $note = "POST /$effLabel -> $($eff.Detail)"
+  if ($alt.Ok) {
+    $note += "; but /$altLabel works -> set wire_api = `"$altLabel`" in config.toml"
+    return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
+  }
+  # transient on the effective wire (relay alive but throttled/overloaded)
+  if ($eff.Code -eq 429 -or ($eff.Code -ge 500 -and $eff.Code -lt 600)) {
+    $note += "; /$altLabel -> $($alt.Detail) (transient)"
+    return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
+  }
+  $note += "; /$altLabel -> $($alt.Detail)"
+  return [pscustomobject]@{ Status = "down"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
+}
+
+# --- Health cache (on-demand only; no background scheduler) ---
+# Caches probe results in ~/.ai-env/health.json with a TTL so `cc list` / `cx
+# list` and switch-time selection don't re-probe on every call. A probe fires
+# only when the cache is stale or -Fresh is passed.
+
+function Get-AiHealthCachePath {
+  return (Join-Path $script:AiConfigDir "health.json")
+}
+
+function Read-AiHealthCache {
+  $path = Get-AiHealthCachePath
+  if (-not (Test-Path -LiteralPath $path)) { return @{} }
+  try {
+    $obj = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    $h = @{}
+    if ($obj) { foreach ($prop in $obj.PSObject.Properties) { $h[$prop.Name] = $prop.Value } }
+    return $h
+  } catch { return @{} }
+}
+
+function Write-AiHealthCacheEntry {
+  param([Parameter(Mandatory = $true)][string]$Key, [Parameter(Mandatory = $true)]$Entry)
+  $path = Get-AiHealthCachePath
+  $h = Read-AiHealthCache
+  $h[$Key] = $Entry
+  New-Item -ItemType Directory -Force -Path $script:AiConfigDir | Out-Null
+  $h | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
+function Clear-AiHealthCache {
+  $path = Get-AiHealthCachePath
+  if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+}
+
+# Probe a profile with a TTL cache. Returns the health result plus ProbedAt
+# (unix seconds) and a Cached flag (true if served from cache).
+function Get-AiProfileHealthCached {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile,
+    [switch]$Fresh,
+    [int]$TtlSec = 300
+  )
+
+  $name = Get-AiProfileName -Profile $Profile
+  $key = "$Tool.$name"
+
+  if (-not $Fresh) {
+    $cache = Read-AiHealthCache
+    if ($cache.ContainsKey($key)) {
+      $entry = $cache[$key]
+      $probedAt = 0
+      try { $probedAt = [int64]$entry.probedAt } catch { }
+      $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+      if ($probedAt -gt 0 -and ($now - $probedAt) -lt $TtlSec) {
+        return [pscustomobject]@{
+          Status    = [string]$entry.status
+          LatencyMs = [int]$entry.latencyMs
+          Method    = [string]$entry.method
+          Error     = $entry.error
+          ProbedAt  = $probedAt
+          Cached    = $true
+        }
+      }
+    }
+  }
+
+  $result = Get-AiProfileHealth -Tool $Tool -Profile $Profile
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  Write-AiHealthCacheEntry -Key $key -Entry ([pscustomobject]@{
+      status    = $result.Status
+      latencyMs = $result.LatencyMs
+      method    = $result.Method
+      error     = $result.Error
+      probedAt  = $now
+    })
+
+  return [pscustomobject]@{
+    Status    = $result.Status
+    LatencyMs = $result.LatencyMs
+    Method    = $result.Method
+    Error     = $result.Error
+    ProbedAt  = $now
+    Cached    = $false
+  }
+}
+
 function New-CodexProfileConfig {
   param(
     [Parameter(Mandatory = $true)]$Profile,
@@ -1580,6 +1915,12 @@ Usage:
                      Prompts for missing base-url/env-key and the secret in a terminal.
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
+  cx probe-model NAME [MODEL]  Set/clear health-probe model (default gpt-5.4-mini)
+  cx default [NAME]   Show/set the default (primary) profile
+  cx health           Probe & report profile health (🟢🟡🔴); --fresh re-probes
+  cx doctor           Run codex doctor full diagnostic (slow, on-demand)
+  cx health-clear     Clear the health probe cache
+  cx next            Cycle to the next enabled profile
   cx help            Show this help
 
 Config:
@@ -1618,6 +1959,11 @@ Usage:
                      Prompts for missing base-url and the secret in a terminal.
   cc add-sub NAME    Register a Claude Code subscription label
   cc remove NAME     Remove a Claude Code profile registration
+  cc probe-model NAME [MODEL]  Set/clear health-probe model (default claude-3-5-haiku)
+  cc default [NAME]   Show/set the default (primary) profile
+  cc health           Probe & report profile health (🟢🟡🔴); --fresh re-probes
+  cc health-clear     Clear the health probe cache
+  cc next            Cycle to the next enabled profile
   cc help            Show this help
 
 Config:
@@ -1637,6 +1983,177 @@ Notes:
   Add commands only write profile metadata. Put real tokens in secrets.toml.
   Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
+}
+
+# Compact one-line health cell for list/status tables.
+function Format-AiHealthCell {
+  param([AllowNull()]$H)
+  if (-not $H) { return "?" }
+  $code = $null
+  if ($H.Error -and ($H.Error -match 'HTTP (\d{3})')) { $code = $Matches[1] }
+  switch ($H.Status) {
+    "healthy"  { "🟢" + $H.LatencyMs + "ms" }
+    "degraded" { "🟡" + ($(if ($code) { $code } else { "slow" })) }
+    "down"     { "🔴" + ($(if ($code) { $code } else { "err" })) }
+    "skip"     { "⏭" }
+    default    { "?" }
+  }
+}
+
+function Test-AiFreshFlag {
+  param([AllowNull()][string[]]$Tokens)
+  if (-not $Tokens) { return $false }
+  foreach ($t in $Tokens) { if ($t -in @("--fresh", "-f")) { return $true } }
+  return $false
+}
+
+# Health cell read ONLY from the cache (no live probe) — used by `list` so it
+# stays fast/offline. Fresh cache -> status icon; stale/never-probed -> ⏭ to
+# signal "run `<tool> health` to refresh".
+function Get-AiHealthCellCached {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile,
+    [int]$TtlSec = 300
+  )
+  $key = "$Tool." + (Get-AiProfileName -Profile $Profile)
+  $cache = Read-AiHealthCache
+  if (-not $cache.ContainsKey($key)) { return "⏭" }
+  $e = $cache[$key]
+  $probedAt = 0
+  try { $probedAt = [int64]$e.probedAt } catch { }
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  if ($probedAt -gt 0 -and ($now - $probedAt) -lt $TtlSec) {
+    return Format-AiHealthCell $e
+  }
+  return "⏭"
+}
+
+# Set or clear a profile's probe_model (the model used by Get-AiProfileHealth).
+# Different relays serve different model sets — e.g. some only serve the latest
+# 4.6 models and return "No available providers" for haiku, causing false 503s.
+# Default probe models: claude=claude-3-5-haiku-20241022, codex=gpt-5.4-mini.
+function Set-AiProfileProbeModel {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [string[]]$Arguments
+  )
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  if ($parsed.Positionals.Count -lt 1) {
+    throw "Usage: probe-model <name> [model]  (omit model to clear -> default)"
+  }
+  $query = ([string]$parsed.Positionals[0]).ToLowerInvariant()
+  $model = if ($parsed.Positionals.Count -ge 2) { [string]$parsed.Positionals[1] } else { "" }
+
+  $registry = Get-AiRegistry
+  $found = $false
+  foreach ($profile in @(Get-AiProperty -Object $registry -Name $Tool -Default @())) {
+    $matched = $false
+    foreach ($cand in Get-AiProfileNames -Profile $profile) {
+      if ($cand.ToLowerInvariant() -eq $query) { $matched = $true; break }
+    }
+    if (-not $matched) { continue }
+    $found = $true
+    $pname = Get-AiProfileName -Profile $profile
+    if ($model) {
+      if ($profile.PSObject.Properties.Name -contains 'probe_model') {
+        $profile.probe_model = $model
+      } else {
+        $profile | Add-Member -NotePropertyName probe_model -NotePropertyValue $model
+      }
+      Write-Host "Set $Tool '$pname' probe_model = $model"
+    } else {
+      if ($profile.PSObject.Properties.Name -contains 'probe_model') {
+        $profile.PSObject.Properties.Remove('probe_model')
+        Write-Host "Cleared $Tool '$pname' probe_model (back to default)"
+      } else {
+        Write-Host "$Tool '$pname' has no probe_model set (already default)"
+      }
+    }
+    break
+  }
+  if (-not $found) { throw "$Tool profile '$($parsed.Positionals[0])' not found." }
+  Save-AiRegistry -Registry $registry
+}
+
+# Auto-failover selection: return the first NON-down profile in priority order
+# (default profile first, then the rest). Degraded/skip are usable; only down
+# (🔴) is skipped. If everything is down, fall back to the default so a switch
+# still succeeds (user can investigate via `list`). On-demand only — probes go
+# through the cache, so this is cheap within the TTL window.
+function Get-AiHealthyProfileName {
+  param([Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool)
+
+  $defaultName = Get-AiDefaultProfileName -Tool $Tool
+  $profiles = @(Get-AiToolProfiles -Tool $Tool | Where-Object { Test-AiProfileEnabled -Profile $_ })
+  $defaultProfile = $null
+  $others = @()
+  foreach ($p in $profiles) {
+    if ((Get-AiProfileName -Profile $p) -eq $defaultName) { $defaultProfile = $p } else { $others += $p }
+  }
+  $ordered = if ($defaultProfile) { @($defaultProfile) + $others } else { $others }
+
+  foreach ($p in $ordered) {
+    $h = Get-AiProfileHealthCached -Tool $Tool -Profile $p
+    if ($h.Status -ne "down") { return (Get-AiProfileName -Profile $p) }
+  }
+  return $defaultName
+}
+
+# Show or set the default (primary) profile for a tool. With no name, prints the
+# current default; with a name, validates it exists and writes defaults.<tool>.
+function Set-AiDefaultProfile {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [string[]]$Arguments
+  )
+
+  $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
+  $current = Get-AiDefaultProfileName -Tool $Tool
+  if ($parsed.Positionals.Count -lt 1) {
+    Write-Host "$Tool default = $current"
+    return
+  }
+  $name = [string]$parsed.Positionals[0]
+  if (-not (Get-AiProfileByName -Tool $Tool -Name $name)) {
+    throw "Unknown $Tool profile '$name'."
+  }
+  $registry = Get-AiRegistry
+  $defaults = Get-AiProperty -Object $registry -Name "defaults"
+  if (-not $defaults) {
+    $defaults = [pscustomobject]@{}
+    $registry | Add-Member -NotePropertyName defaults -NotePropertyValue $defaults
+  }
+  if ($defaults.PSObject.Properties.Name -contains $Tool) {
+    $defaults.$Tool = $name
+  } else {
+    $defaults | Add-Member -NotePropertyName $Tool -NotePropertyValue $name
+  }
+  Save-AiRegistry -Registry $registry
+  Write-Host "Set $Tool default = $name"
+}
+
+# Drop cache entries for profiles that no longer exist (keeps health.json tidy
+# after `cc/cx remove`). Called from the list commands.
+function Sync-AiHealthCache {
+  param([Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool)
+
+  $cache = Read-AiHealthCache
+  if ($cache.Count -eq 0) { return }
+  $valid = [System.Collections.Generic.HashSet[string]]::new()
+  foreach ($p in Get-AiToolProfiles -Tool $Tool) {
+    [void]$valid.Add("$Tool." + (Get-AiProfileName -Profile $p))
+  }
+  $changed = $false
+  foreach ($k in @($cache.Keys)) {
+    if ($k.StartsWith("$Tool.") -and -not $valid.Contains($k)) { $cache.Remove($k); $changed = $true }
+  }
+  if ($changed) {
+    $path = Get-AiHealthCachePath
+    New-Item -ItemType Directory -Force -Path $script:AiConfigDir | Out-Null
+    $cache | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding UTF8
+  }
 }
 
 function Get-CodexProfileRows {
@@ -1666,6 +2183,7 @@ function Get-CodexProfileRows {
       Sel = if ($name -eq $saved) { "*" } else { " " }
       Name = $name
       Mode = $mode
+      Health = Get-AiHealthCellCached -Tool "codex" -Profile $profile
       Profile = Get-CodexRuntimeProfileName -Profile $profile
       Ready = $ready
       Home = $profileHome
@@ -1708,6 +2226,7 @@ function Get-ClaudeProfileRows {
       Sel = if ($name -eq $saved) { "*" } else { " " }
       Name = $name
       Mode = $mode
+      Health = Get-AiHealthCellCached -Tool "claude" -Profile $profile
       Ready = if ($secretOk) { "ok" } else { "missing secret" }
       Secret = if ($mode -eq "api") { Get-AiSecretDisplay -Tool "claude" -Profile $profile -Names @("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") } else { "<none>" }
       BaseUrl = $baseUrl
@@ -1718,12 +2237,40 @@ function Get-ClaudeProfileRows {
 
 function Show-CodexList {
   Write-Host "Codex profiles ($script:AiRegistryPath):"
-  Get-CodexProfileRows | Format-Table Sel, Name, Mode, Ready, Profile, Home, Config, Secret, BaseUrl, Env -AutoSize
+  Get-CodexProfileRows | Format-Table Sel, Name, Mode, Health, Profile, BaseUrl -AutoSize
+  Write-Host "  (Health = cached snapshot, ⏭=stale/unprobed; run 'cx health' to refresh)" -ForegroundColor DarkGray
 }
 
 function Show-ClaudeList {
   Write-Host "Claude Code profiles ($script:AiRegistryPath):"
-  Get-ClaudeProfileRows | Format-Table Sel, Name, Mode, Ready, Secret, BaseUrl, Env -AutoSize
+  Get-ClaudeProfileRows | Format-Table Sel, Name, Mode, Health, BaseUrl -AutoSize
+  Write-Host "  (Health = cached snapshot, ⏭=stale/unprobed; run 'cc health' to refresh)" -ForegroundColor DarkGray
+}
+
+# Dedicated health report — keeps `list`/`status` focused on config; health is
+# its own concern. Probes every profile via the cache; --fresh forces re-probe.
+function Show-AiHealth {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [switch]$Fresh
+  )
+  Sync-AiHealthCache -Tool $Tool
+  $label = if ($Tool -eq "codex") { "Codex" } else { "Claude Code" }
+  Write-Host "$label profile health ($script:AiRegistryPath):"
+  $saved = Get-AiSavedProfileName -Tool $Tool
+  $rows = foreach ($p in Get-AiToolProfiles -Tool $Tool) {
+    $n = Get-AiProfileName -Profile $p
+    $h = Get-AiProfileHealthCached -Tool $Tool -Profile $p -Fresh:$Fresh
+    [pscustomobject]@{
+      Sel    = if ($n -eq $saved) { "*" } else { " " }
+      Name   = $n
+      Health = Format-AiHealthCell $h
+      Method = if ($h.Method) { $h.Method } else { "-" }
+      Note   = if ($h.Error) { $h.Error } else { "" }
+    }
+  }
+  $rows | Format-Table -AutoSize
+  Write-Host ("  (health " + ($(if ($Fresh) { "re-probed (fresh)" } else { "cached <=5min" })) + "; '" + $Tool + " health --fresh' re-probe, '" + $Tool + " health-clear' clears)") -ForegroundColor DarkGray
 }
 
 function Show-CodexStatus {
@@ -1744,8 +2291,20 @@ function Show-CodexStatus {
   Write-Host "  OPENAI_API_KEY: $(Format-AiSecretPreview $env:OPENAI_API_KEY)"
   Write-Host "  Cached login: $(Get-CodexLoginStatusText)"
   if ($profile) {
-    Write-CodexDoctorSummary -Profile $profile
+    $h = Get-AiProfileHealthCached -Tool "codex" -Profile $profile
+    Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
   }
+}
+
+# On-demand `codex doctor` (slow: real network/websocket checks). Kept out of
+# `cx status` so status stays instant; run this only for the full Codex
+# self-diagnostic. Injects the active profile's provider via -c overrides.
+function Show-CodexDoctor {
+  $saved = Get-AiSavedProfileName -Tool "codex"
+  $profile = Get-AiProfileByName -Tool "codex" -Name ($env:AI_CODEX_LABEL ?? $saved)
+  if (-not $profile) { $profile = Get-AiProfileByName -Tool "codex" -Name (Get-AiDefaultProfileName -Tool "codex") }
+  if (-not $profile) { Write-Host "No codex profile to diagnose."; return }
+  Write-CodexDoctorSummary -Profile $profile
 }
 
 function Show-ClaudeStatus {
@@ -1758,7 +2317,432 @@ function Show-ClaudeStatus {
   Write-Host "  ANTHROPIC_BASE_URL: $($env:ANTHROPIC_BASE_URL ?? '<unset>')"
   Write-Host "  ANTHROPIC_API_KEY: $(Format-AiSecretPreview $env:ANTHROPIC_API_KEY)"
   Write-Host "  ANTHROPIC_AUTH_TOKEN: $(Format-AiSecretPreview $env:ANTHROPIC_AUTH_TOKEN)"
+  $cprofile = Get-AiProfileByName -Tool "claude" -Name ($env:AI_CLAUDE_LABEL ?? $saved)
+  if (-not $cprofile) { $cprofile = Get-AiProfileByName -Tool "claude" -Name (Get-AiDefaultProfileName -Tool "claude") }
+  if ($cprofile) {
+    $h = Get-AiProfileHealthCached -Tool "claude" -Profile $cprofile
+    Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
+  }
   Write-ClaudeExternalStatus
+}
+
+# ===========================================================================
+# MCP module. ~/.ai-env/mcp.toml is the single source of truth for MCP servers
+# across Claude Code and Codex. `mcp sync` pushes each enabled server to its
+# targets (global):
+#   Claude -> ~/.claude.json mcpServers      (direct JSON merge, atomic)
+#   Codex  -> ~/.codex/config.toml [mcp_servers.NAME]  (native enabled flag)
+# `enabled` is uniform: Claude has no per-server flag (disabled = omitted);
+# Codex uses native enabled = false. Edit ONLY mcp.toml (mcp edit).
+# Target paths honor env overrides (AI_CLAUDE_JSON_PATH / AI_CODEX_CONFIG_PATH)
+# so tests can isolate without touching the real config files.
+# ===========================================================================
+
+function Get-AiMcpRegistryPath {
+  return (Join-Path $script:AiConfigDir "mcp.toml")
+}
+function Get-AiClaudeJsonPath {
+  if ($env:AI_CLAUDE_JSON_PATH) { return $env:AI_CLAUDE_JSON_PATH }
+  return (Join-Path $HOME '.claude.json')
+}
+function Get-AiCodexConfigPath {
+  if ($env:AI_CODEX_CONFIG_PATH) { return $env:AI_CODEX_CONFIG_PATH }
+  return (Join-Path $HOME '.codex\config.toml')
+}
+
+# TOML array of strings: ["a", "b"] -> @('a','b')
+function ConvertFrom-AiTomlStringArray {
+  param([AllowNull()][string]$Raw)
+  $list = @()
+  if (-not $Raw) { return $list }
+  foreach ($m in [regex]::Matches($Raw, '"((?:\\.|[^"])*)"')) { $list += $m.Groups[1].Value }
+  return $list
+}
+# TOML inline table of strings: { K = "V" } -> @{K='V'}
+function ConvertFrom-AiTomlInlineTable {
+  param([AllowNull()][string]$Raw)
+  $h = @{}
+  if (-not $Raw) { return $h }
+  foreach ($m in [regex]::Matches($Raw, '([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:\\.|[^"])*)"')) { $h[$m.Groups[1].Value] = $m.Groups[2].Value }
+  return $h
+}
+
+# Read mcp.toml -> ordered hashtable name -> entry(pscustomobject).
+function Read-AiMcpRegistry {
+  $path = Get-AiMcpRegistryPath
+  $result = [ordered]@{}
+  if (-not (Test-Path -LiteralPath $path)) { return $result }
+  $current = $null
+  foreach ($line in Get-Content -LiteralPath $path) {
+    $t = "$line".Trim()
+    if (-not $t -or $t.StartsWith('#')) { continue }
+    if ($t -match '^\[mcp\.([^\]]+)\]\s*$') {
+      $current = $Matches[1].Trim()
+      $result[$current] = [pscustomobject]@{
+        Name = $current; Kind = 'stdio'; Command = @(); Url = $null; Env = @{}; Sync = @('claude', 'codex'); Enabled = $true
+      }
+      continue
+    }
+    if ($t -match '^\[') { $current = $null; continue }
+    if (-not $current) { continue }
+    if ($t -match '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$') {
+      $key = $Matches[1]; $raw = $Matches[2].Trim()
+      $e = $result[$current]
+      switch ($key) {
+        'command' { $e.Kind = 'stdio'; $e.Command = @(ConvertFrom-AiTomlStringArray $raw) }
+        'url'     { $e.Kind = 'http'; $e.Url = [string](ConvertFrom-AiTomlValue $raw) }
+        'env'     { $e.Env = ConvertFrom-AiTomlInlineTable $raw }
+        'sync'    { $e.Sync = @(ConvertFrom-AiTomlStringArray $raw) }
+        'enabled' { $e.Enabled = ($raw -match 'true') }
+      }
+    }
+  }
+  return $result
+}
+
+# --- Claude target (~/.claude.json mcpServers) ---
+function Read-ClaudeMcpServerNames {
+  $path = Get-AiClaudeJsonPath
+  if (-not (Test-Path -LiteralPath $path)) { return @() }
+  try {
+    $d = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    if ($d.mcpServers) { return @($d.mcpServers.PSObject.Properties.Name) }
+  } catch { }
+  return @()
+}
+# Build the object Claude stores for a server.
+function ConvertTo-ClaudeMcpEntry {
+  param([Parameter(Mandatory = $true)]$Entry)
+  if ($Entry.Kind -eq 'http') { return [pscustomobject]@{ type = 'http'; url = [string]$Entry.Url } }
+  $cmd = @($Entry.Command)
+  $obj = [ordered]@{}
+  if ($cmd.Count -gt 0) { $obj['command'] = [string]$cmd[0] }
+  $obj['args'] = if ($cmd.Count -gt 1) { @($cmd[1..($cmd.Count - 1)]) } else { @() }
+  if ($Entry.Env.Count -gt 0) { $obj['env'] = ($Entry.Env) }
+  return [pscustomobject]$obj
+}
+# Upsert ($Entry) or remove ($Entry=$null) a server in .claude.json mcpServers.
+# Atomic (tmp+move); preserves all other keys. Backs up once per path.
+function Set-ClaudeMcpServer {
+  param([Parameter(Mandatory = $true)][string]$Name, $Entry)
+  $path = Get-AiClaudeJsonPath
+  $bak = "$path.aienv.bak"
+  if ((Test-Path -LiteralPath $path) -and -not (Test-Path -LiteralPath $bak)) {
+    Copy-Item -LiteralPath $path -Destination $bak -Force
+  }
+  $d = $null
+  if (Test-Path -LiteralPath $path) {
+    try { $d = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { $d = $null }
+  }
+  if (-not $d) { $d = [pscustomobject]@{ } }
+  # copy existing mcpServers into a mutable hashtable (preserves siblings),
+  # then upsert/remove the one entry, and write it back.
+  $ms = @{ }
+  if ($d.PSObject.Properties.Name -contains 'mcpServers' -and $d.mcpServers) {
+    foreach ($p in $d.mcpServers.PSObject.Properties) { $ms[$p.Name] = $p.Value }
+  }
+  if ($Entry) {
+    $ms[$Name] = (ConvertTo-ClaudeMcpEntry $Entry)
+  } elseif ($ms.ContainsKey($Name)) {
+    $ms.Remove($Name)
+  }
+  $d | Add-Member -NotePropertyName mcpServers -NotePropertyValue $ms -Force
+  $tmp = "$path.tmp"
+  ($d | ConvertTo-Json -Depth 100) | Set-Content -LiteralPath $tmp -Encoding UTF8
+  Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+# --- Codex target (~/.codex/config.toml [mcp_servers.NAME]) ---
+function Test-CodexMcpServer {
+  param([Parameter(Mandatory = $true)][string]$Name)
+  $path = Get-AiCodexConfigPath
+  if (-not (Test-Path -LiteralPath $path)) { return $false }
+  return [bool](Select-String -LiteralPath $path -Pattern ('^\[mcp_servers\.' + [regex]::Escape($Name) + '\]') -Quiet)
+}
+function ConvertTo-CodexMcpBlock {
+  param([Parameter(Mandatory = $true)]$Entry)
+  $lines = @("[mcp_servers.$($Entry.Name)]")
+  if ($Entry.Kind -eq 'http') {
+    $lines += 'url = "' + [string]$Entry.Url + '"'
+  } else {
+    $arr = (@($Entry.Command) | ForEach-Object { '"' + [string]$_ + '"' }) -join ', '
+    $lines += 'command = [' + $arr + ']'
+    if ($Entry.Env.Count -gt 0) {
+      $pairs = ($Entry.Env.GetEnumerator() | ForEach-Object { [string]$_.Key + ' = "' + [string]$_.Value + '"' }) -join ', '
+      $lines += 'env = { ' + $pairs + ' }'
+    }
+  }
+  $lines += 'enabled = ' + $(if ($Entry.Enabled) { 'true' } else { 'false' })
+  return ($lines -join "`n")
+}
+# Remove [mcp_servers.NAME] section; if $Block, append it. Preserves all other
+# config.toml content (model, providers, user-managed mcp_servers, etc.).
+function Set-CodexMcpServer {
+  param([Parameter(Mandatory = $true)][string]$Name, [AllowEmptyString()][string]$Block)
+  $path = Get-AiCodexConfigPath
+  if (-not (Test-Path -LiteralPath $path)) {
+    if (-not $Block) { return }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    "" | Set-Content -LiteralPath $path -Encoding UTF8
+  }
+  $lines = @(Get-Content -LiteralPath $path)
+  $out = New-Object System.Collections.Generic.List[string]
+  $header = "[mcp_servers.$Name]"
+  $skip = $false
+  foreach ($l in $lines) {
+    if ("$l".Trim() -match '^\[([^\]]+)\]\s*$') { $skip = ("[" + $Matches[1].Trim() + "]") -ceq $header }
+    if ($skip) { continue }
+    $out.Add($l)
+  }
+  if ($Block) {
+    if ($out.Count -gt 0 -and "$($out[$out.Count - 1])".Trim() -ne '') { $out.Add('') }
+    $out.Add($Block.TrimEnd())
+  }
+  ($out -join "`n") | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
+# Push every mcp.toml entry to its targets (idempotent).
+function Sync-AiMcp {
+  $reg = Read-AiMcpRegistry
+  $path = Get-AiMcpRegistryPath
+  if ($reg.Count -eq 0) {
+    Write-Host "No MCP servers in $path. Run 'mcp edit' to define some."
+    return
+  }
+  $upserts = 0; $removes = 0
+  foreach ($entry in $reg.Values) {
+    foreach ($tool in @('claude', 'codex')) {
+      $want = ($entry.Enabled -and ($entry.Sync -contains $tool))
+      if ($tool -eq 'claude') {
+        if ($want) { Set-ClaudeMcpServer -Name $entry.Name -Entry $entry; $upserts++ }
+        else { Set-ClaudeMcpServer -Name $entry.Name -Entry $null; $removes++ }
+      } else {
+        $block = if ($want) { ConvertTo-CodexMcpBlock -Entry $entry } else { '' }
+        Set-CodexMcpServer -Name $entry.Name -Block $block
+        if ($want) { $upserts++ } else { $removes++ }
+      }
+    }
+  }
+  Write-Host "MCP sync done: $upserts upsert(s), $removes remove(s). Targets: Claude ($(Get-AiClaudeJsonPath)), Codex ($(Get-AiCodexConfigPath))."
+}
+
+# --- reverse direction: pull existing servers from targets into mcp.toml ---
+function Read-ClaudeMcpServers {
+  $path = Get-AiClaudeJsonPath
+  $result = [ordered]@{ }
+  if (-not (Test-Path -LiteralPath $path)) { return $result }
+  try {
+    $d = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    if ($d.mcpServers) { foreach ($p in $d.mcpServers.PSObject.Properties) { $result[$p.Name] = $p.Value } }
+  } catch { }
+  return $result
+}
+function Read-CodexMcpServers {
+  $path = Get-AiCodexConfigPath
+  $result = [ordered]@{ }
+  if (-not (Test-Path -LiteralPath $path)) { return $result }
+  $current = $null
+  foreach ($line in Get-Content -LiteralPath $path) {
+    $t = "$line".Trim()
+    if ($t -match '^\[mcp_servers\.([^\]]+)\]\s*$') {
+      $current = $Matches[1].Trim()
+      $result[$current] = [pscustomobject]@{ Name = $current; Command = @(); Url = $null; Env = @{}; Enabled = $true }
+      continue
+    }
+    if ($t -match '^\[') { $current = $null; continue }
+    if (-not $current) { continue }
+    if ($t -match '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$') {
+      $key = $Matches[1]; $raw = $Matches[2].Trim(); $e = $result[$current]
+      switch ($key) {
+        'command' { $e.Command = @(ConvertFrom-AiTomlStringArray $raw) }
+        'url'     { $e.Url = [string](ConvertFrom-AiTomlValue $raw) }
+        'env'     { $e.Env = ConvertFrom-AiTomlInlineTable $raw }
+        'enabled' { $e.Enabled = ($raw -match 'true') }
+      }
+    }
+  }
+  return $result
+}
+# Convert a Claude target entry -> mcp.toml entry shape.
+function ConvertFrom-ClaudeMcpTarget {
+  param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)]$Entry)
+  $e = [pscustomobject]@{ Name = $Name; Kind = 'stdio'; Command = @(); Url = $null; Env = @{}; Sync = @('claude'); Enabled = $true }
+  if ("$Entry.type" -in @('http', 'sse') -or $Entry.url) {
+    $e.Kind = 'http'; $e.Url = [string]$Entry.url
+  } else {
+    if ($Entry.command -is [array]) { $e.Command = @($Entry.command) }
+    else {
+      $cmd = @(); if ($Entry.command) { $cmd += [string]$Entry.command }
+      if ($Entry.args) { $cmd += @($Entry.args) }
+      $e.Command = $cmd
+    }
+    if ($Entry.env) { foreach ($p in $Entry.env.PSObject.Properties) { $e.Env[$p.Name] = [string]$p.Value } }
+  }
+  return $e
+}
+# Convert a Codex target entry -> mcp.toml entry shape.
+function ConvertFrom-CodexMcpTarget {
+  param([Parameter(Mandatory = $true)]$Entry)
+  $e = [pscustomobject]@{ Name = $Entry.Name; Kind = 'stdio'; Command = @(); Url = $null; Env = @{}; Sync = @('codex'); Enabled = $Entry.Enabled }
+  if ($Entry.Url) { $e.Kind = 'http'; $e.Url = $Entry.Url } else { $e.Command = @($Entry.Command); $e.Env = $Entry.Env }
+  return $e
+}
+# Serialize an mcp.toml entry -> TOML block text.
+function ConvertTo-McpTomlBlock {
+  param([Parameter(Mandatory = $true)]$Entry)
+  $lines = @("[mcp.$($Entry.Name)]")
+  if ($Entry.Kind -eq 'http') {
+    $lines += 'url = "' + [string]$Entry.Url + '"'
+  } else {
+    $arr = (@($Entry.Command) | ForEach-Object { '"' + [string]$_ + '"' }) -join ', '
+    $lines += 'command = [' + $arr + ']'
+    if ($Entry.Env.Count -gt 0) {
+      $pairs = ($Entry.Env.GetEnumerator() | ForEach-Object { [string]$_.Key + ' = "' + [string]$_.Value + '"' }) -join ', '
+      $lines += 'env = { ' + $pairs + ' }'
+    }
+  }
+  $lines += 'sync = [' + ((@($Entry.Sync) | ForEach-Object { '"' + $_ + '"' }) -join ', ') + ']'
+  $lines += 'enabled = ' + $(if ($Entry.Enabled) { 'true' } else { 'false' })
+  return ($lines -join "`n")
+}
+# Pull existing MCP servers from Claude + Codex targets into mcp.toml. Adds only
+# names not already present (preserves your mcp.toml edits). -Name pulls one.
+function Import-AiMcpFromTargets {
+  param([string]$Name)
+  $claude = Read-ClaudeMcpServers
+  $codex = Read-CodexMcpServers
+  $existing = Read-AiMcpRegistry
+  if ($Name) {
+    $names = @($Name)
+    if (-not ($claude.Contains($Name) -or $codex.Contains($Name))) { Write-Host "'$Name' not found in Claude or Codex targets."; return }
+  } else {
+    $names = @(@($claude.Keys) + @($codex.Keys) | Select-Object -Unique)
+  }
+  if ($names.Count -eq 0) { Write-Host "No MCP servers found in targets to pull."; return }
+  $added = 0; $skipped = 0; $newBlocks = @()
+  foreach ($n in $names) {
+    if ($existing.Contains($n)) { $skipped++; continue }
+    $inC = $claude.Contains($n); $inX = $codex.Contains($n)
+    if ($inC) { $e = ConvertFrom-ClaudeMcpTarget -Name $n -Entry $claude[$n] } else { $e = ConvertFrom-CodexMcpTarget -Entry $codex[$n] }
+    $sync = @(); if ($inC) { $sync += 'claude' }; if ($inX) { $sync += 'codex' }
+    $e.Sync = $sync
+    $newBlocks += (ConvertTo-McpTomlBlock -Entry $e)
+    $added++
+  }
+  if ($added -gt 0) {
+    $path = Get-AiMcpRegistryPath
+    if (-not (Test-Path -LiteralPath $path)) {
+      New-Item -ItemType Directory -Force -Path $script:AiConfigDir | Out-Null
+      "# ~/.ai-env/mcp.toml - pulled from Claude Code & Codex. Edit freely; run mcp sync to push back." | Set-Content -LiteralPath $path
+    }
+    $tail = (Get-Content -Raw -LiteralPath $path).TrimEnd()
+    $sep = if ($tail -ne '') { "`n`n" } else { "" }
+    Add-Content -LiteralPath $path -Value ($sep + ($newBlocks -join "`n`n") + "`n")
+  }
+  Write-Host "MCP pull: +$added added, $skipped skipped (already in mcp.toml). -> $(Get-AiMcpRegistryPath)"
+}
+
+function Show-AiMcpList {
+  $reg = Read-AiMcpRegistry
+  $path = Get-AiMcpRegistryPath
+  if ($reg.Count -eq 0) { Write-Host "No MCP servers in $path. Run 'mcp edit'."; return }
+  $claude = Read-ClaudeMcpServerNames
+  $rows = foreach ($e in $reg.Values) {
+    [pscustomobject]@{
+      Name    = $e.Name
+      Type    = if ($e.Kind -eq 'http') { 'http' } else { 'stdio' }
+      Claude  = if ($claude -contains $e.Name) { 'yes' } else { '-' }
+      Codex   = if (Test-CodexMcpServer -Name $e.Name) { 'yes' } else { '-' }
+      Enabled = if ($e.Enabled) { 'on' } else { 'off' }
+      Sync    = ($e.Sync -join ',')
+    }
+  }
+  $rows | Format-Table -AutoSize
+  Write-Host "  (yes = present in target's live config; run 'mcp sync' to align)" -ForegroundColor DarkGray
+}
+
+function Show-AiMcpGet {
+  param([string]$Name)
+  $reg = Read-AiMcpRegistry
+  if (-not $Name) { Write-Host "Usage: mcp get NAME"; return }
+  if (-not $reg.Contains($Name)) { Write-Host "No MCP server '$Name' in mcp.toml."; return }
+  $e = $reg[$Name]
+  Write-Host "mcp.$Name :"
+  Write-Host "  kind    : $($e.Kind)"
+  if ($e.Kind -eq 'http') { Write-Host "  url     : $($e.Url)" } else { Write-Host "  command : $($e.Command -join ' ')" }
+  if ($e.Env.Count -gt 0) { Write-Host "  env     : " + (($e.Env.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ') }
+  Write-Host "  sync    : $($e.Sync -join ', ')"
+  Write-Host "  enabled : $($e.Enabled)"
+  $claude = Read-ClaudeMcpServerNames
+  Write-Host "  claude  : $(if ($claude -contains $Name) { 'present' } else { '-' })"
+  Write-Host "  codex   : $(if (Test-CodexMcpServer -Name $Name) { 'present' } else { '-' })"
+}
+
+function Edit-AiMcpRegistry {
+  $path = Get-AiMcpRegistryPath
+  if (-not (Test-Path -LiteralPath $path)) {
+    New-Item -ItemType Directory -Force -Path $script:AiConfigDir | Out-Null
+    @'
+# ~/.ai-env/mcp.toml — single source of truth for MCP servers (Claude Code + Codex).
+# `mcp sync` pushes each enabled server to global targets:
+#   Claude -> ~/.claude.json mcpServers
+#   Codex  -> ~/.codex/config.toml [mcp_servers.NAME]
+# A server is EITHER stdio (command = [...]) OR http (url = "...").
+# sync  = which tools get it (omit = both). enabled = false keeps it defined but skips it.
+
+# [mcp.context7]
+# command = ["npx", "-y", "@upstash/context7-mcp"]
+# env = {}
+# sync = ["claude", "codex"]
+# enabled = true
+
+# [mcp.figma]
+# url = "https://mcp.figma.com/mcp"
+# sync = ["codex"]
+# enabled = false
+'@ | Set-Content -LiteralPath $path -Encoding UTF8
+    Write-Host "Created starter mcp.toml at $path"
+  }
+  $editor = if ($env:EDITOR) { $env:EDITOR } elseif ($env:VISUAL) { $env:VISUAL } elseif ($IsWindows) { 'notepad' } else { 'vi' }
+  # mcp edit should open-and-return (non-blocking): drop any --wait/-w flag so
+  # GUI editors (cursor/code) launch and hand the shell back immediately. The
+  # global $EDITOR keeps --wait for tools that need blocking (e.g. git commit).
+  $parts = @($editor -split '\s+' | Where-Object { $_ -and $_ -notin @('--wait', '-w') })
+  if ($parts.Count -eq 0) { $parts = @('notepad') }
+  $rest = @(); if ($parts.Count -gt 1) { $rest = @($parts[1..($parts.Count - 1)]) }; $rest += $path
+  Write-Host "Opening $path with $($parts[0]) ..."
+  & $parts[0] @rest
+}
+
+function Show-AiMcpHelp {
+  @'
+mcp - manage MCP servers across Claude Code & Codex from ~/.ai-env/mcp.toml
+
+Usage:
+  mcp                 Show this help
+  mcp list            List servers + whether each target has them
+  mcp edit            Open mcp.toml in EDITOR (creates a starter if absent)
+  mcp sync            Push mcp.toml -> Claude (~/.claude.json) & Codex (~/.codex/config.toml)
+  mcp pull [NAME]     Import existing MCP servers FROM Claude & Codex into mcp.toml
+  mcp get NAME        Show one server's config + target status
+
+mcp.toml is the single source of truth; edit it, then `mcp sync` (idempotent).
+enabled = false keeps a server defined but skips it on sync.
+sync = ["claude"] or ["codex"] limits a server to one tool (omit = both).
+'@ | Write-Host
+}
+
+function mcp {
+  $remaining = @($args)
+  if ($remaining.Count -eq 0 -or ($remaining[0] -in @('help', '-h', '--help'))) { Show-AiMcpHelp; return }
+  switch (($remaining[0]).ToString().ToLowerInvariant()) {
+    'list' { Show-AiMcpList; return }
+    'edit' { Edit-AiMcpRegistry; return }
+    'sync' { Sync-AiMcp; return }
+    { $_ -in @('pull', 'import') } { Import-AiMcpFromTargets -Name ($remaining[1]); return }
+    { $_ -in @('get', 'show') } { Show-AiMcpGet -Name ($remaining[1]); return }
+    default { Write-Host "Unknown mcp command '$($remaining[0])'."; Show-AiMcpHelp; return }
+  }
 }
 
 function cx {
@@ -1769,10 +2753,16 @@ function cx {
       { $_ -in @("help", "-h", "--help", "/?") } { Show-CxHelp; return }
       "list" { Show-CodexList; return }
       "status" { Show-CodexStatus; return }
+      "doctor" { Show-CodexDoctor; return }
+      "health" { Show-AiHealth -Tool "codex" -Fresh:(Test-AiFreshFlag ($remaining | Select-Object -Skip 1)); return }
       "stats" { Show-CodexStats -Arguments @($remaining | Select-Object -Skip 1); return }
       "add-api" { Add-CodexApiProfile -Arguments @($remaining | Select-Object -Skip 1); return }
       "add-sub" { Add-CodexSubProfile -Arguments @($remaining | Select-Object -Skip 1); return }
       "remove" { Remove-CodexProfile -Arguments @($remaining | Select-Object -Skip 1); return }
+      "probe-model" { Set-AiProfileProbeModel -Tool "codex" -Arguments @($remaining | Select-Object -Skip 1); return }
+      "default" { Set-AiDefaultProfile -Tool "codex" -Arguments @($remaining | Select-Object -Skip 1); return }
+      "health-clear" { Clear-AiHealthCache; Write-Host "health cache cleared"; return }
+      "next" { $remaining = @((Get-AiNextProfileName -Tool "codex")) }
     }
   }
 
@@ -1783,7 +2773,12 @@ function cx {
     }
     $remaining = @($remaining | Select-Object -Skip 1)
   } else {
-    $profile = Get-AiProfileByName -Tool "codex" -Name (Get-AiNextProfileName -Tool "codex")
+    $autoName = Get-AiHealthyProfileName -Tool "codex"
+    $profile = Get-AiProfileByName -Tool "codex" -Name $autoName
+    if ($profile) {
+      $ah = Get-AiProfileHealthCached -Tool "codex" -Profile $profile
+      Write-Host ("auto-select: $autoName " + (Format-AiHealthCell $ah)) -ForegroundColor DarkGray
+    }
   }
 
   if ($remaining.Count -gt 0) {
@@ -1803,9 +2798,14 @@ function cc {
       { $_ -in @("help", "-h", "--help", "/?") } { Show-CcHelp; return }
       "list" { Show-ClaudeList; return }
       "status" { Show-ClaudeStatus; return }
+      "health" { Show-AiHealth -Tool "claude" -Fresh:(Test-AiFreshFlag ($remaining | Select-Object -Skip 1)); return }
       "add-api" { Add-ClaudeApiProfile -Arguments @($remaining | Select-Object -Skip 1); return }
       "add-sub" { Add-ClaudeSubProfile -Arguments @($remaining | Select-Object -Skip 1); return }
       "remove" { Remove-ClaudeProfile -Arguments @($remaining | Select-Object -Skip 1); return }
+      "probe-model" { Set-AiProfileProbeModel -Tool "claude" -Arguments @($remaining | Select-Object -Skip 1); return }
+      "default" { Set-AiDefaultProfile -Tool "claude" -Arguments @($remaining | Select-Object -Skip 1); return }
+      "health-clear" { Clear-AiHealthCache; Write-Host "health cache cleared"; return }
+      "next" { $remaining = @((Get-AiNextProfileName -Tool "claude")) }
     }
   }
 
@@ -1816,7 +2816,12 @@ function cc {
     }
     $remaining = @($remaining | Select-Object -Skip 1)
   } else {
-    $profile = Get-AiProfileByName -Tool "claude" -Name (Get-AiNextProfileName -Tool "claude")
+    $autoName = Get-AiHealthyProfileName -Tool "claude"
+    $profile = Get-AiProfileByName -Tool "claude" -Name $autoName
+    if ($profile) {
+      $ah = Get-AiProfileHealthCached -Tool "claude" -Profile $profile
+      Write-Host ("auto-select: $autoName " + (Format-AiHealthCell $ah)) -ForegroundColor DarkGray
+    }
   }
 
   if ($remaining.Count -gt 0) {
