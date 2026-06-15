@@ -1333,6 +1333,23 @@ function Test-AiProbeBody {
 
 # Resolve a final health verdict from per-candidate results (a hashtable keyed
 # by candidate Label -> request object from Invoke-AiProbeRequest). Instant.
+# Collapse a verbose probe exception into a short, scannable Note. HTTP codes
+# and "200 but..." are already concise and pass through; long exception text
+# (e.g. the HttpClient timeout / SSL EPROTO messages) is classified so the Note
+# column never gets truncated mid-word.
+function ConvertTo-AiProbeError {
+  param([string]$Detail)
+  if (-not $Detail) { return "" }
+  if ($Detail -match "^(HTTP \d|200 but)") { return $Detail }
+  $l = $Detail.ToLower()
+  if ($l -match "timeout|canceled|timed out|httpclient\.timeout") { return "timeout" }
+  if ($l -match "ssl|handshake|eproto|sslv3|certificate|trust") { return "TLS handshake failed" }
+  if ($l -match "econnrefused|connection refused") { return "connection refused" }
+  if ($l -match "enotfound|getaddrinfo|nodata|getaddr|dns") { return "DNS failed" }
+  if ($l -match "econnreset|socket hang up|reset by peer|reset") { return "connection reset" }
+  return $Detail
+}
+
 function Resolve-AiProfileHealth {
   param($Plan, $Results, [int]$DegradedMs = 8000)
 
@@ -1342,10 +1359,11 @@ function Resolve-AiProfileHealth {
       $st = if ($m.LatencyMs -gt $DegradedMs) { "degraded" } else { "healthy" }
       return [pscustomobject]@{ Status = $st; LatencyMs = $m.LatencyMs; Method = "generation"; Error = $null }
     }
+    $md = ConvertTo-AiProbeError $m.Detail
     if ($m.Code -eq 429 -or ($m.Code -ge 500 -and $m.Code -lt 600)) {
-      return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $m.Detail + " (transient)") }
+      return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $md + " (transient)") }
     }
-    return [pscustomobject]@{ Status = "down"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $m.Detail) }
+    return [pscustomobject]@{ Status = "down"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $md) }
   }
 
   # codex: verdict = the endpoint matching the configured wire_api.
@@ -1355,16 +1373,18 @@ function Resolve-AiProfileHealth {
     $st = if ($eff.LatencyMs -gt $DegradedMs) { "degraded" } else { "healthy" }
     return [pscustomobject]@{ Status = $st; LatencyMs = $eff.LatencyMs; Method = "generation:$($Plan.EffLabel)"; Error = $null }
   }
-  $note = "POST /$($Plan.EffLabel) -> $($eff.Detail)"
+  $effD = ConvertTo-AiProbeError $eff.Detail
+  $altD = ConvertTo-AiProbeError $alt.Detail
+  $note = "POST /$($Plan.EffLabel) -> $effD"
   if ($alt.Ok) {
     $note += "; but /$($Plan.AltLabel) works -> set wire_api = `"$($Plan.AltLabel)`" in config.toml"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
   }
   if ($eff.Code -eq 429 -or ($eff.Code -ge 500 -and $eff.Code -lt 600)) {
-    $note += "; /$($Plan.AltLabel) -> $($alt.Detail) (transient)"
+    $note += "; /$($Plan.AltLabel) -> $altD (transient)"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
   }
-  $note += "; /$($Plan.AltLabel) -> $($alt.Detail)"
+  $note += "; /$($Plan.AltLabel) -> $altD"
   return [pscustomobject]@{ Status = "down"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
 }
 
@@ -2474,7 +2494,11 @@ foreach ($c in $Candidates) {
           $d = $display[$nn]; if (-not $d) { $d = @{ Health = "?"; Method = "-"; Note = ""; Pending = $false } }
           if ($d.Pending) { $cell = "⏳"; $method = "-"; $note = "waiting ⏳" + ("." * $dots) }
           else { $cell = $d.Health; $method = $d.Method; $note = $d.Note }
-          if ($note.Length -gt 48) { $note = $note.Substring(0, 48) }
+          # Keep the row on one line (no wrap => clean in-place redraw). Note
+          # column starts at col 41; cap to terminal width (concise errors fit).
+          $noteMax = ([int][Console]::WindowWidth) - 42
+          if ($noteMax -lt 30) { $noteMax = 120 }
+          if ($note.Length -gt $noteMax) { $note = $note.Substring(0, $noteMax) }
           $sel = if ($nn -eq $saved) { "*" } else { " " }
           $lines += ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f $sel, $nn, $cell, $method, $note)
         }
