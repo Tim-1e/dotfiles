@@ -1631,141 +1631,19 @@ if(changed)fs.writeFileSync(hp,JSON.stringify(j,null,2)+"\n");
 }
 
 _ai_health_show() {
-  # This function uses 0-based computed array indices (_pjs[$idx] etc.). zsh
-  # arrays are 1-indexed, so under zsh switch to ksh-style 0-indexed arrays for
-  # this function only (local_options scopes it — does not touch the user shell).
-  [ -n "${ZSH_VERSION:-}" ] && setopt local_options ksh_arrays 2>/dev/null
-  local tool="$1" fresh="${2:-0}" saved label
-  _ai_health_sync_cache "$tool"
-  [ "$tool" = codex ] && label="Codex" || label="Claude Code"
-  echo "$label profile health ($AI_REGISTRY_PATH):"
-  saved="$(_ai_saved_profile "$tool")"
-  _ai_require_node || return 1
-  local profiles
-  profiles="$(node -e '
-const fs=require("fs");const p=process.argv[1],tool=process.argv[2];
-let r={};try{r=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
-for(const x of r[tool]||[])console.log(JSON.stringify(x));
-' "$AI_REGISTRY_PATH" "$tool")" || return 1
-
-  # Per-profile display state (indexed arrays; bash 3.2 has no associative
-  # arrays). pending=1 -> still probing (shown as ⏳…); need=1 -> has a job.
-  local -a _pjs=() _nms=() _cell=() _method=() _note=() _pending=() _need=()
-  local idx=0 pj nm cached st cell method note
-  while IFS= read -r pj; do
-    [ -n "$pj" ] || continue
-    _pjs[$idx]="$pj"
-    nm="$(_ai_profile_value "$pj" name "")"
-    _nms[$idx]="$nm"
-    cell="⏳…"; method="-"; note="probing…"; _pending[$idx]=1; _need[$idx]=1
-    if [ "$fresh" != "1" ]; then
-      cached="$(_ai_health_cached "$tool" "$pj" 0 1)"
-      st="$(_ai_health_field "$cached" status)"
-      if [ "$st" != "skip" ]; then
-        cell="$(_ai_health_cell "$cached")"
-        method="$(_ai_health_field "$cached" method)"; [ -n "$method" ] || method="-"
-        note="$(_ai_health_field "$cached" error)"; [ -n "$note" ] || note=""
-        _pending[$idx]=0; _need[$idx]=0
-      fi
-    fi
-    _cell[$idx]="$cell"; _method[$idx]="$method"; _note[$idx]="$note"
-    idx=$((idx+1))
-  done <<<"$profiles"
-  local count=$idx
-
-  # Render header + rows from the live arrays (bash dynamic scoping lets a
-  # nested function read the caller's locals). $1=dots for pending spinner
-  # (0 => none); $2=1 => clear-mode (each line prefixed with \r + clear-line,
-  # for in-place redraw after the caller moved the cursor up).
-  _render() {
-    local dots="${1:-0}" clear="${2:-0}" i sel cell method note pref dots_str k
-    if [ "$clear" = "1" ]; then pref=$'\r\033[K'; else pref=""; fi
-    dots_str=""; k=0
-    while [ "$k" -lt "$dots" ]; do dots_str="$dots_str."; k=$((k+1)); done
-    printf '%s%-3s %-14s %-9s %-11s %s\n' "$pref" "Sel" "Name" "Health" "Method" "Note"
-    printf '%s%-3s %-14s %-9s %-11s %s\n' "$pref" "---" "----" "------" "------" "----"
-    i=0
-    while [ "$i" -lt "$count" ]; do
-      if [ "${_pending[$i]}" = "1" ] && [ "$dots" -gt 0 ]; then
-        cell="⏳"; method="-"; note="waiting ⏳$dots_str"
-      else
-        cell="${_cell[$i]}"; method="${_method[$i]}"; note="${_note[$i]}"
-      fi
-      [ "${_nms[$i]}" = "$saved" ] && sel="*" || sel=" "
-      printf '%s%-3s %-14s %-9s %-11s %s\n' "$pref" "$sel" "${_nms[$i]}" "$cell" "$method" "$note"
-      i=$((i+1))
-    done
-  }
-  # Read a finished probe's result file, stamp probedAt, cache, update display.
-  _apply_result() {
-    local i="$1" result
-    result="$(cat "$tmpdir/$i.probe" 2>/dev/null)"
-    result="$(node -e 'try{const r=JSON.parse(process.argv[1]);r.probedAt=Math.floor(Date.now()/1000);process.stdout.write(JSON.stringify(r));}catch(e){process.stdout.write("{\"status\":\"down\",\"latencyMs\":0,\"method\":null,\"error\":\"probe failed\"}");}' "$result")"
-    _ai_health_store "$tool" "${_nms[$i]}" "$result" 2>/dev/null || true
-    _cell[$i]="$(_ai_health_cell "$result")"
-    _method[$i]="$(_ai_health_field "$result" method)"; [ -n "${_method[$i]}" ] || _method[$i]="-"
-    _note[$i]="$(_ai_health_field "$result" error)"
-  }
-
-  local pending_count=0 i=0
-  while [ "$i" -lt "$count" ]; do [ "${_pending[$i]}" = "1" ] && pending_count=$((pending_count+1)); i=$((i+1)); done
-
-  # Fire every stale probe concurrently (background node jobs). Total time is
-  # the slowest single relay, not the sum.
-  local tmpdir; tmpdir="$(mktemp -d)"
-  i=0
-  while [ "$i" -lt "$count" ]; do
-    [ "${_pending[$i]}" = "1" ] && ( _ai_probe_health "$tool" "${_pjs[$i]}" >"$tmpdir/$i.probe" 2>/dev/null ) &
-    i=$((i+1))
-  done
-
-  # Live (TTY): redraw the table in place with an animated spinner; the
-  # foreground polls every 300ms (only writer, so no host contention) and only
-  # uses relative cursor-up (\033[<n>A) — not save/restore, which glitched.
-  # Non-TTY (pipes/CI): stream one line per completion, then a final table.
-  local live=0
-  [ "$pending_count" -gt 0 ] && { [ -t 1 ] || [ "${AI_HEALTH_LIVE:-}" = "1" ]; } && live=1
-
-  if [ "$live" = "1" ]; then
-    local nlines=$((2 + count))
-    local tick=0 remaining=$pending_count dots
-    _render 1 0
-    while [ "$remaining" -gt 0 ]; do
-      sleep 0.3
-      tick=$((tick+1))
-      dots=$(( (tick % 7) + 1 ))
-      i=0
-      while [ "$i" -lt "$count" ]; do
-        if [ "${_pending[$i]}" = "1" ] && [ -s "$tmpdir/$i.probe" ]; then
-          _apply_result "$i"; _pending[$i]=0; remaining=$((remaining-1))
-        fi
-        i=$((i+1))
-      done
-      printf '\033[%dA' "$nlines"
-      _render "$dots" 1
-    done
-  else
-    if [ "$pending_count" -gt 0 ]; then
-      printf '  probing %s profile(s) in parallel (results stream as they resolve)…\n' "$pending_count"
-      local remaining=$pending_count
-      while [ "$remaining" -gt 0 ]; do
-        sleep 0.2
-        i=0
-        while [ "$i" -lt "$count" ]; do
-          if [ "${_pending[$i]}" = "1" ] && [ -s "$tmpdir/$i.probe" ]; then
-            _apply_result "$i"; _pending[$i]=0; remaining=$((remaining-1))
-            printf '    %s %-14s %s\n' "${_cell[$i]}" "${_nms[$i]}" "${_note[$i]}"
-          fi
-          i=$((i+1))
-        done
-      done
-    fi
-    wait 2>/dev/null
-    _render 0 0
-  fi
-  rm -rf "$tmpdir"
-  echo "  (health $( [ "$fresh" = 1 ] && echo 're-probed (fresh, parallel)' || echo 'cached <=5min'); ${tool} health --fresh re-probe, ${tool} health-clear clears)"
+  # Delegate to the Node TUI helper (ai-health.mjs). The old shell version probed
+  # via background `&` jobs, whose zsh/bash job-control notifications ([N] PID /
+  # [N]+done) interleaved with ANSI redraw and broke the table. One foreground
+  # Node process does the concurrency + timed redraw itself — no shell job
+  # control, no [N] noise, save-anchor+clear-below rendering, ASCII spinner.
+  local tool="$1" fresh="${2:-0}" flag=""
+  [ "$fresh" = "1" ] && flag="--fresh"
+  _ai_require_node >/dev/null 2>&1 || return 1
+  local mjs="$HOME/.local/share/ai-env/ai-health.mjs"
+  [ -f "$mjs" ] || { echo "health helper missing: $mjs" >&2; return 1; }
+  node "$mjs" "$tool" $flag
 }
+
 
 # $3=1 forces a live probe (status --refresh); otherwise cache-only (instant).
 _ai_health_status_line() {
