@@ -1631,6 +1631,10 @@ if(changed)fs.writeFileSync(hp,JSON.stringify(j,null,2)+"\n");
 }
 
 _ai_health_show() {
+  # This function uses 0-based computed array indices (_pjs[$idx] etc.). zsh
+  # arrays are 1-indexed, so under zsh switch to ksh-style 0-indexed arrays for
+  # this function only (local_options scopes it — does not touch the user shell).
+  [ -n "${ZSH_VERSION:-}" ] && setopt local_options ksh_arrays 2>/dev/null
   local tool="$1" fresh="${2:-0}" saved label
   _ai_health_sync_cache "$tool"
   [ "$tool" = codex ] && label="Codex" || label="Claude Code"
