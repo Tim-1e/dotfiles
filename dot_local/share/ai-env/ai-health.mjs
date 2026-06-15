@@ -259,21 +259,27 @@ async function main() {
     return;
   }
 
-  // TTY: dynamic redraw with save-anchor + clear-below, hide cursor, ASCII spinner.
-  const HIDE = '\x1b[?25l', SHOW = '\x1b[?25h', SAVE = '\x1b[s', RESTORE = '\x1b[u', CLR = '\x1b[J';
-  const cleanup = () => { process.stdout.write(SHOW); process.stdout.write('\n'); };
+  // TTY: dynamic in-place redraw via cursor-up-by-N. The earlier \x1b[s / \x1b[u
+  // (save/restore cursor) isn't supported by all terminals and made the table
+  // append/scroll downward. cursor-up \x1b[<N>A is universally supported; N is
+  // exact because buildTable truncates columns to terminal width (no wrap).
+  const HIDE = '\x1b[?25l', SHOW = '\x1b[?25h';
+  const cleanup = () => { process.stdout.write(SHOW); };
   process.on('SIGINT', () => { cleanup(); process.exit(130); });
   process.on('SIGTERM', () => { cleanup(); process.exit(143); });
   process.on('exit', cleanup);
-  let tick = 0;
-  let lastRender = 0;
+  let tick = 0, lastRender = 0, prevLines = 0;
   const render = (force) => {
     const now = Date.now();
     if (!force && now - lastRender < 100) return;
     lastRender = now;
-    process.stdout.write(RESTORE + CLR + buildTable(rows, savedName, tick) + '\n');
+    const table = buildTable(rows, savedName, tick);
+    // move up the previously-printed table lines, clear to end of screen, reprint
+    const up = prevLines > 0 ? '\x1b[' + prevLines + 'A\x1b[J' : '';
+    process.stdout.write(up + table + '\n');
+    prevLines = table.split('\n').length;
   };
-  process.stdout.write(HIDE + SAVE);
+  process.stdout.write(HIDE);
   render(true);
   const timer = setInterval(() => { tick++; render(); }, 100);
   await Promise.allSettled(todo.map(async (t) => {
@@ -285,7 +291,6 @@ async function main() {
   clearInterval(timer);
   writeCache(updates);
   render(true);
-  cleanup();
-  process.stdout.write('  (health ' + (fresh ? 're-probed (fresh, parallel)' : 'cached <=5min') + '; ' + tool + ' health --fresh re-probe, ' + tool + ' health-clear clears)\n');
+  process.stdout.write(SHOW + '\n  (health ' + (fresh ? 're-probed (fresh, parallel)' : 'cached <=5min') + '; ' + tool + ' health --fresh re-probe, ' + tool + ' health-clear clears)\n');
 }
 main().catch((e) => { process.stderr.write('health error: ' + (e && e.message || e) + '\n'); process.exit(1); });
