@@ -1941,7 +1941,12 @@ TOML
   local cmd rest
   cmd="$(printf '%s' "$ed" | awk '{for(i=1;i<=NF;i++)if($i!="--wait"&&$i!="-w")printf "%s%s",$i,(i<NF?" ":"");print""}' | awk '{print $1}')"
   echo "Opening $AI_MCP_PATH with $cmd ..."
-  ( "$cmd" "$AI_MCP_PATH" >/dev/null 2>&1 & ) 2>/dev/null || command "$ed" "$AI_MCP_PATH" >/dev/null 2>&1 &
+  # Terminal editors (nano/vi/...) need the foreground TTY — run blocking. GUI
+  # editors (cursor/code/...) launch a window and return — background + redirect.
+  case "$cmd" in
+    nano|vi|vim|nvim|emacs|micro|joe|ne|mg) "$cmd" "$AI_MCP_PATH" ;;
+    *) ( "$cmd" "$AI_MCP_PATH" >/dev/null 2>&1 & ) 2>/dev/null ;;
+  esac
 }
 
 # `cc edit` / `cx edit` — open the profile registry (profiles.json), where every
@@ -1956,7 +1961,12 @@ _ai_registry_edit() {
   local cmd
   cmd="$(printf '%s' "$ed" | awk '{for(i=1;i<=NF;i++)if($i!="--wait"&&$i!="-w")printf "%s%s",$i,(i<NF?" ":"");print""}' | awk '{print $1}')"
   echo "Opening $AI_REGISTRY_PATH with $cmd ..."
-  ( "$cmd" "$AI_REGISTRY_PATH" >/dev/null 2>&1 & ) 2>/dev/null || command "$ed" "$AI_REGISTRY_PATH" >/dev/null 2>&1 &
+  # Terminal editors (nano/vi/...) need the foreground TTY — run blocking. GUI
+  # editors (cursor/code/...) launch a window and return — background + redirect.
+  case "$cmd" in
+    nano|vi|vim|nvim|emacs|micro|joe|ne|mg) "$cmd" "$AI_REGISTRY_PATH" ;;
+    *) ( "$cmd" "$AI_REGISTRY_PATH" >/dev/null 2>&1 & ) 2>/dev/null ;;
+  esac
 }
 _ai_mcp_pull() {
   local name="${1:-}" cp cj cx existing added=0 skipped=0 newblocks=""
