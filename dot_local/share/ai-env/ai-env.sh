@@ -1065,7 +1065,10 @@ _cx_print_status() {
     echo "  OPENAI_API_KEY: <cleared>"
     echo "  Subscription quota: not exposed by Codex CLI"
   fi
-  _cx_doctor_summary "$profile_json"
+  # Cached health line (instant — no network). codex doctor is deliberately
+  # NOT run here: it does live network/websocket checks that stall the switch.
+  # Use `cx doctor` for the full diagnostic on demand.
+  _ai_health_status_line codex "$profile_json" 0
 }
 
 _cc_print_status() {
@@ -1204,6 +1207,7 @@ EOF
       return
       ;;
     status)
+      _hr=0; case "$*" in *--refresh*|*-r*) _hr=1;; esac
       echo "Codex state:"
       echo "  Registry: $AI_REGISTRY_PATH"
       echo "  State: $AI_STATE_PATH"
@@ -1213,7 +1217,11 @@ EOF
       echo "  CODEX_HOME: ${CODEX_HOME:-$HOME/.codex}"
       echo "  OPENAI_API_KEY: $(_ai_secret_preview "${OPENAI_API_KEY:-}")"
       echo "  Cached login: $(_codex_login_status)"
-      profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _ai_health_status_line codex "$profile_json"
+      profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _ai_health_status_line codex "$profile_json" "$_hr"
+      return
+      ;;
+    edit)
+      _ai_registry_edit
       return
       ;;
     stats)
@@ -1311,6 +1319,7 @@ EOF
       return
       ;;
     status)
+      _hr=0; case "$*" in *--refresh*|*-r*) _hr=1;; esac
       echo "Claude Code state:"
       echo "  Registry: $AI_REGISTRY_PATH"
       echo "  State: $AI_STATE_PATH"
@@ -1319,8 +1328,12 @@ EOF
       echo "  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-<unset>}"
       echo "  ANTHROPIC_API_KEY: $(_ai_secret_preview "${ANTHROPIC_API_KEY:-}")"
       echo "  ANTHROPIC_AUTH_TOKEN: $(_ai_secret_preview "${ANTHROPIC_AUTH_TOKEN:-}")"
-      profile_json="$(_ai_profile_json claude "${AI_CLAUDE_LABEL:-$(_ai_saved_profile claude)}")" && _ai_health_status_line claude "$profile_json"
+      profile_json="$(_ai_profile_json claude "${AI_CLAUDE_LABEL:-$(_ai_saved_profile claude)}")" && _ai_health_status_line claude "$profile_json" "$_hr"
       _cc_external_status
+      return
+      ;;
+    edit)
+      _ai_registry_edit
       return
       ;;
     add-api)
@@ -1488,8 +1501,10 @@ _ai_health_store() {
 }
 
 # TTL-cached probe. Echoes result JSON. $3=1 forces a fresh probe.
+# $4=1 -> cache-only: never probe (keeps list/status/switch instant; a stale or
+# unprobed entry reads as "skip" ⏭). Use `health` / `status --refresh` to probe.
 _ai_health_cached() {
-  local tool="$1" profile_json="$2" fresh="${3:-0}" name result probed now stamped
+  local tool="$1" profile_json="$2" fresh="${3:-0}" cache_only="${4:-0}" name result probed now stamped
   name="$(_ai_profile_value "$profile_json" name "")"
   if [ "$fresh" != "1" ]; then
     result="$(_ai_health_read_entry "$tool" "$name")"
@@ -1500,6 +1515,10 @@ _ai_health_cached() {
         printf '%s' "$result"; return 0
       fi
     fi
+  fi
+  if [ "$cache_only" = "1" ]; then
+    printf '{"status":"skip","latencyMs":0,"method":null,"error":null,"probedAt":0}'
+    return 0
   fi
   result="$(_ai_probe_health "$tool" "$profile_json")"
   stamped="$(node -e 'const r=JSON.parse(process.argv[1]);r.probedAt=Math.floor(Date.now()/1000);process.stdout.write(JSON.stringify(r));' "$result")"
@@ -1545,11 +1564,19 @@ const d=all.find(x=>String(x.name)===def);const rest=all.filter(x=>String(x.name
 const out=d?[d,...rest]:rest;
 for(const x of out)console.log(JSON.stringify(x));
 ' "$AI_REGISTRY_PATH" "$tool" "$default")" || return 1
+  local mode
   while IFS= read -r pj; do
     [ -n "$pj" ] || continue
-    h="$(_ai_health_cached "$tool" "$pj" 0)"
+    mode="$(_ai_profile_value "$pj" mode api)"
+    h="$(_ai_health_cached "$tool" "$pj" 0 1)"
     st="$(_ai_health_field "$h" status)"
-    if [ "$st" != "down" ]; then _ai_profile_value "$pj" name ""; return; fi
+    # Subscription profiles need no probe -> usable. For api profiles, require a
+    # cached POSITIVE signal (healthy/degraded); an unprobed api profile reads
+    # "skip" and is NOT auto-selected (we don't know it's up) -> keep looking.
+    # Run `cc health` first to populate health for real auto-failover.
+    if [ "$mode" = "sub" ] || [ "$st" = "healthy" ] || [ "$st" = "degraded" ]; then
+      _ai_profile_value "$pj" name ""; return
+    fi
   done <<<"$ordered"
   printf '%s\n' "$default"
 }
@@ -1605,32 +1632,70 @@ if(changed)fs.writeFileSync(hp,JSON.stringify(j,null,2)+"\n");
 }
 
 _ai_health_show() {
-  local tool="$1" fresh="${2:-0}" saved label nm h cell method err sel pj
+  local tool="$1" fresh="${2:-0}" saved label
   _ai_health_sync_cache "$tool"
   [ "$tool" = codex ] && label="Codex" || label="Claude Code"
   echo "$label profile health ($AI_REGISTRY_PATH):"
   saved="$(_ai_saved_profile "$tool")"
   _ai_require_node || return 1
-  node -e '
+  local profiles
+  profiles="$(node -e '
 const fs=require("fs");const p=process.argv[1],tool=process.argv[2];
 let r={};try{r=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
 for(const x of r[tool]||[])console.log(JSON.stringify(x));
-' "$AI_REGISTRY_PATH" "$tool" | while IFS= read -r pj; do
+' "$AI_REGISTRY_PATH" "$tool")" || return 1
+
+  # Gather profiles + names + a need-probe flag (cache-only check, instant).
+  local -a _pjs=() _nms=() _need=()
+  local pj nm cached st
+  while IFS= read -r pj; do
     [ -n "$pj" ] || continue
+    _pjs+=("$pj")
     nm="$(_ai_profile_value "$pj" name "")"
-    h="$(_ai_health_cached "$tool" "$pj" "$fresh")"
-    cell="$(_ai_health_cell "$h")"
-    method="$(_ai_health_field "$h" method)"; [ -n "$method" ] || method="-"
-    err="$(_ai_health_field "$h" error)"
-    [ "$nm" = "$saved" ] && sel="*" || sel=" "
-    printf '%s %-14s %-10s %-12s %s\n' "$sel" "$nm" "$cell" "$method" "$err"
+    _nms+=("$nm")
+    if [ "$fresh" = "1" ]; then
+      _need+=(1)
+    else
+      cached="$(_ai_health_cached "$tool" "$pj" 0 1)"
+      st="$(_ai_health_field "$cached" status)"
+      [ "$st" = "skip" ] && _need+=(1) || _need+=(0)
+    fi
+  done <<<"$profiles"
+
+  # Fire every stale probe concurrently (background node jobs), then wait. Total
+  # time is the slowest single relay, not the sum — `cc health` no longer waits
+  # on each slow relay one after another.
+  local tmpdir i
+  tmpdir="$(mktemp -d)"
+  for i in "${!_pjs[@]}"; do
+    [ "${_need[$i]}" = "1" ] || continue
+    ( _ai_probe_health "$tool" "${_pjs[$i]}" >"$tmpdir/$i.probe" 2>/dev/null ) &
   done
-  echo "  (health $( [ "$fresh" = 1 ] && echo 're-probed (fresh)' || echo 'cached <=5min'); ${tool} health --fresh re-probe, ${tool} health-clear clears)"
+  wait
+
+  local result cell method err sel
+  for i in "${!_pjs[@]}"; do
+    if [ "${_need[$i]}" = "1" ]; then
+      result="$(cat "$tmpdir/$i.probe" 2>/dev/null)"
+      result="$(node -e 'try{const r=JSON.parse(process.argv[1]);r.probedAt=Math.floor(Date.now()/1000);process.stdout.write(JSON.stringify(r));}catch(e){process.stdout.write("{\"status\":\"down\",\"latencyMs\":0,\"method\":null,\"error\":\"probe failed\"}");}' "$result")"
+      _ai_health_store "$tool" "${_nms[$i]}" "$result" 2>/dev/null || true
+    else
+      result="$(_ai_health_read_entry "$tool" "${_nms[$i]}")"
+    fi
+    cell="$(_ai_health_cell "$result")"
+    method="$(_ai_health_field "$result" method)"; [ -n "$method" ] || method="-"
+    err="$(_ai_health_field "$result" error)"
+    [ "${_nms[$i]}" = "$saved" ] && sel="*" || sel=" "
+    printf '%s %-14s %-10s %-12s %s\n' "$sel" "${_nms[$i]}" "$cell" "$method" "$err"
+  done
+  rm -rf "$tmpdir"
+  echo "  (health $( [ "$fresh" = 1 ] && echo 're-probed (fresh, parallel)' || echo 'cached <=5min'); ${tool} health --fresh re-probe, ${tool} health-clear clears)"
 }
 
+# $3=1 forces a live probe (status --refresh); otherwise cache-only (instant).
 _ai_health_status_line() {
-  local tool="$1" profile_json="$2" h cell err
-  h="$(_ai_health_cached "$tool" "$profile_json" 0)"
+  local tool="$1" profile_json="$2" fresh="${3:-0}" h cell err
+  h="$(_ai_health_cached "$tool" "$profile_json" "$fresh" 1)"
   cell="$(_ai_health_cell "$h")"
   err="$(_ai_health_field "$h" error)"
   [ -n "$err" ] && err="  $err"
@@ -1802,6 +1867,21 @@ TOML
   cmd="$(printf '%s' "$ed" | awk '{for(i=1;i<=NF;i++)if($i!="--wait"&&$i!="-w")printf "%s%s",$i,(i<NF?" ":"");print""}' | awk '{print $1}')"
   echo "Opening $AI_MCP_PATH with $cmd ..."
   ( "$cmd" "$AI_MCP_PATH" >/dev/null 2>&1 & ) 2>/dev/null || command "$ed" "$AI_MCP_PATH" >/dev/null 2>&1 &
+}
+
+# `cc edit` / `cx edit` — open the profile registry (profiles.json), where every
+# profile's base_url, model, probe_model, mode etc. live. Non-blocking (no --wait).
+_ai_registry_edit() {
+  if [ ! -f "$AI_REGISTRY_PATH" ]; then
+    echo "Registry not found: $AI_REGISTRY_PATH"
+    return 1
+  fi
+  local ed="${EDITOR:-${VISUAL:-}}"
+  [ -n "$ed" ] || ed="$(command -v cursor || command -v code || echo vi)"
+  local cmd
+  cmd="$(printf '%s' "$ed" | awk '{for(i=1;i<=NF;i++)if($i!="--wait"&&$i!="-w")printf "%s%s",$i,(i<NF?" ":"");print""}' | awk '{print $1}')"
+  echo "Opening $AI_REGISTRY_PATH with $cmd ..."
+  ( "$cmd" "$AI_REGISTRY_PATH" >/dev/null 2>&1 & ) 2>/dev/null || command "$ed" "$AI_REGISTRY_PATH" >/dev/null 2>&1 &
 }
 _ai_mcp_pull() {
   local name="${1:-}" cp cj cx existing added=0 skipped=0 newblocks=""

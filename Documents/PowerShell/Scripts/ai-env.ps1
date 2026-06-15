@@ -1217,40 +1217,37 @@ function Get-AiProfileProbeTarget {
   return $result
 }
 
-# Probe a profile by issuing a real (cheap/free) API request and measuring
-# latency. Returns: Status = healthy | degraded | down | skip; LatencyMs; Error.
-#   Claude: GET {base}/v1/models (free), fall back to POST /v1/messages (1 token)
-#   Codex:  GET {base}/v1/models (free)
-# Never mutates the current process environment.
-function Get-AiProfileHealth {
+# Build a probe plan for one profile WITHOUT making any request. Returns either:
+#   @{ Early = <result> }            -> no live probe (sub mode / missing config)
+#   @{ Headers; Kind; Candidates }   -> ready to fire; Candidates is an array of
+#                                       @{ Label; Url; Body; Check }. For codex
+#                                       also EffLabel/AltLabel (wire_api driven).
+# Splitting plan-building (pure, instant) from request-firing lets `cc/cx health`
+# fire every profile's requests concurrently instead of one-by-one.
+function Get-AiProfileProbePlan {
   param(
     [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
-    [Parameter(Mandatory = $true)]$Profile,
-    [int]$TimeoutSec = 20,
-    [int]$DegradedMs = 8000
+    [Parameter(Mandatory = $true)]$Profile
   )
 
   $mode = Get-AiProfileMode -Profile $Profile
   if ($mode -ne "api") {
-    return [pscustomobject]@{ Status = "skip"; LatencyMs = 0; Error = "subscription mode (no remote probe)" }
+    return @{ Early = [pscustomobject]@{ Status = "skip"; LatencyMs = 0; Method = $null; Error = "subscription mode (no remote probe)" } }
   }
 
   $target = Get-AiProfileProbeTarget -Tool $Tool -Profile $Profile
   if (-not $target.BaseOrigin) {
-    return [pscustomobject]@{ Status = "down"; LatencyMs = 0; Error = "missing base_url" }
+    return @{ Early = [pscustomobject]@{ Status = "down"; LatencyMs = 0; Method = $null; Error = "missing base_url" } }
   }
   if (-not $target.SecretOk) {
-    return [pscustomobject]@{ Status = "down"; LatencyMs = 0; Error = "missing credentials" }
+    return @{ Early = [pscustomobject]@{ Status = "down"; LatencyMs = 0; Method = $null; Error = "missing credentials" } }
   }
 
   $origin = [string]$target.BaseOrigin
   $origin = $origin.TrimEnd('/')
-
-  # Probe the REAL wire path each tool uses (not /models — that hides real
-  # failures like a relay that answers /models but 404s on /responses).
-  #   Claude: POST /v1/messages  (Claude Code always uses the Messages API)
-  #   Codex:  POST /responses AND /chat/completions  (the two wire_api variants)
   $candidates = @()
+  $effLabel = $null; $altLabel = $null
+
   if ($Tool -eq "claude") {
     $apiBase = if ($origin -match '/v1$') { ($origin -replace '/v1$', '') } else { $origin }
     $candidates += @{
@@ -1261,10 +1258,10 @@ function Get-AiProfileHealth {
       Check = "messages"
     }
   } else {
-    $hasVersion    = $origin -match '/v\d+$'
-    $responsesRel  = if ($hasVersion) { "responses" } else { "v1/responses" }
-    $chatRel       = if ($hasVersion) { "chat/completions" } else { "v1/chat/completions" }
-    $model         = if ($target.ProbeModel) { $target.ProbeModel } else { "probe" }
+    $hasVersion   = $origin -match '/v\d+$'
+    $responsesRel = if ($hasVersion) { "responses" } else { "v1/responses" }
+    $chatRel      = if ($hasVersion) { "chat/completions" } else { "v1/chat/completions" }
+    $model        = if ($target.ProbeModel) { $target.ProbeModel } else { "probe" }
     $candidates += @{
       Label = "responses"
       Url   = Join-Path-Uri $origin $responsesRel
@@ -1278,92 +1275,125 @@ function Get-AiProfileHealth {
         ConvertTo-Json -Depth 5 -Compress
       Check = "chat"
     }
-  }
-
-  # Run each candidate; record the real HTTP result + whether the body carried
-  # actual generated output (not just a 200).
-  $results = @{}
-  $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  foreach ($c in $candidates) {
-    $sw.Restart()
-    $r = [pscustomobject]@{ Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
-    try {
-      # Use Invoke-RestMethod (not Invoke-WebRequest): IWR buffers + post-processes
-      # the whole response and hangs to timeout on some relays under PS7
-      # (e.g. sub2api.projectk.org timed out at 20s via IWR but returned in ~5s
-      # via IRM). IRM returns the parsed object directly; a non-throwing call is
-      # always a 2xx.
-      $j = Invoke-RestMethod -Uri $c.Url -Method Post -Headers $target.Headers -Body $c.Body `
-        -ContentType "application/json" -TimeoutSec $TimeoutSec -ErrorAction Stop
-      $sw.Stop()
-      $r.Code = 200
-      $r.LatencyMs = [int]$sw.ElapsedMilliseconds
-      $valid = $false
-      switch ($c.Check) {
-        "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
-        "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
-        "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
-      }
-      $r.Ok = $valid
-      if (-not $valid) { $r.Detail = "200 but no generated content" }
-    } catch {
-      $sw.Stop()
-      $r.LatencyMs = [int]$sw.ElapsedMilliseconds
-      if ($_.Exception.Response) {
-        $r.Code = [int]$_.Exception.Response.StatusCode
-        $r.Detail = "HTTP $($r.Code)"
-      } else {
-        $r.Detail = $_.Exception.Message
-      }
+    # verdict endpoint = the configured wire_api (default responses)
+    $cfgPath = Get-CodexProfilePath -Profile $Profile
+    $wireApi = $null
+    if ($cfgPath -and (Test-Path -LiteralPath $cfgPath)) {
+      $wireApi = Get-TomlStringValue -Path $cfgPath -Key "wire_api"
     }
-    $results[$c.Label] = $r
+    $effLabel = if ($wireApi -and $wireApi -match "chat") { "chat" } else { "responses" }
+    $altLabel = if ($effLabel -eq "chat") { "responses" } else { "chat" }
   }
 
-  # Claude: single endpoint decides.
-  if ($Tool -eq "claude") {
-    $m = $results["messages"]
+  return @{ Headers = $target.Headers; Kind = $Tool; Candidates = $candidates; EffLabel = $effLabel; AltLabel = $altLabel }
+}
+
+# Fire ONE probe request. Uses Invoke-RestMethod (Invoke-WebRequest stalls to
+# timeout on some relays under PS7). Returns Ok/Code/LatencyMs/Detail/Body; the
+# caller validates the body (Test-AiProbeBody) and applies the verdict.
+function Invoke-AiProbeRequest {
+  param($Url, $Headers, $Body, [int]$TimeoutSec = 20)
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $r = [pscustomobject]@{ Ok = $false; Code = 0; LatencyMs = 0; Detail = $null; Body = $null }
+  try {
+    $j = Invoke-RestMethod -Uri $Url -Method Post -Headers $Headers -Body $Body `
+      -ContentType "application/json" -TimeoutSec $TimeoutSec -ErrorAction Stop
+    $sw.Stop()
+    $r.Code = 200
+    $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+    $r.Body = $j
+  } catch {
+    $sw.Stop()
+    $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+    if ($_.Exception.Response) {
+      $r.Code = [int]$_.Exception.Response.StatusCode
+      $r.Detail = "HTTP $($r.Code)"
+    } else {
+      $r.Detail = $_.Exception.Message
+    }
+  }
+  return $r
+}
+
+# Validate a fired request's parsed body against its Check type (mutates $Req:
+# sets Ok + Detail). A non-2xx Code is left as-is (not ok).
+function Test-AiProbeBody {
+  param($Req, [string]$Check)
+  if ($Req.Code -lt 200 -or $Req.Code -ge 300) { return }
+  $valid = $false
+  $j = $Req.Body
+  switch ($Check) {
+    "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
+    "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
+    "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
+  }
+  $Req.Ok = $valid
+  if (-not $valid -and -not $Req.Detail) { $Req.Detail = "200 but no generated content" }
+}
+
+# Resolve a final health verdict from per-candidate results (a hashtable keyed
+# by candidate Label -> request object from Invoke-AiProbeRequest). Instant.
+function Resolve-AiProfileHealth {
+  param($Plan, $Results, [int]$DegradedMs = 8000)
+
+  if ($Plan.Kind -eq "claude") {
+    $m = $Results["messages"]
     if ($m.Ok) {
       $st = if ($m.LatencyMs -gt $DegradedMs) { "degraded" } else { "healthy" }
       return [pscustomobject]@{ Status = $st; LatencyMs = $m.LatencyMs; Method = "generation"; Error = $null }
     }
-    # 429/5xx are transient (relay alive but throttled/overloaded) -> degraded;
-    # 401/403/404 etc. are real failures -> down.
     if ($m.Code -eq 429 -or ($m.Code -ge 500 -and $m.Code -lt 600)) {
       return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $m.Detail + " (transient)") }
     }
     return [pscustomobject]@{ Status = "down"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $m.Detail) }
   }
 
-  # Codex: verdict = the endpoint matching the configured wire_api.
-  $cfgPath = Get-CodexProfilePath -Profile $Profile
-  $wireApi = $null
-  if ($cfgPath -and (Test-Path -LiteralPath $cfgPath)) {
-    $wireApi = Get-TomlStringValue -Path $cfgPath -Key "wire_api"
-  }
-  $effLabel = if ($wireApi -and $wireApi -match "chat") { "chat" } else { "responses" }
-  $altLabel = if ($effLabel -eq "chat") { "responses" } else { "chat" }
-  $eff = $results[$effLabel]
-  $alt = $results[$altLabel]
-
+  # codex: verdict = the endpoint matching the configured wire_api.
+  $eff = $Results[$Plan.EffLabel]
+  $alt = $Results[$Plan.AltLabel]
   if ($eff.Ok) {
     $st = if ($eff.LatencyMs -gt $DegradedMs) { "degraded" } else { "healthy" }
-    return [pscustomobject]@{ Status = $st; LatencyMs = $eff.LatencyMs; Method = "generation:$effLabel"; Error = $null }
+    return [pscustomobject]@{ Status = $st; LatencyMs = $eff.LatencyMs; Method = "generation:$($Plan.EffLabel)"; Error = $null }
   }
-
-  # The configured wire fails. If the other wire works, it's fixable -> degraded
-  # with an actionable note; otherwise check transient vs real failure.
-  $note = "POST /$effLabel -> $($eff.Detail)"
+  $note = "POST /$($Plan.EffLabel) -> $($eff.Detail)"
   if ($alt.Ok) {
-    $note += "; but /$altLabel works -> set wire_api = `"$altLabel`" in config.toml"
+    $note += "; but /$($Plan.AltLabel) works -> set wire_api = `"$($Plan.AltLabel)`" in config.toml"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
   }
-  # transient on the effective wire (relay alive but throttled/overloaded)
   if ($eff.Code -eq 429 -or ($eff.Code -ge 500 -and $eff.Code -lt 600)) {
-    $note += "; /$altLabel -> $($alt.Detail) (transient)"
+    $note += "; /$($Plan.AltLabel) -> $($alt.Detail) (transient)"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
   }
-  $note += "; /$altLabel -> $($alt.Detail)"
+  $note += "; /$($Plan.AltLabel) -> $($alt.Detail)"
   return [pscustomobject]@{ Status = "down"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
+}
+
+# Probe a profile by issuing a real (cheap/free) API request and measuring
+# latency. Returns: Status = healthy | degraded | down | skip; LatencyMs; Error.
+#   Claude: GET {base}/v1/models (free), fall back to POST /v1/messages (1 token)
+#   Codex:  GET {base}/v1/models (free)
+# Never mutates the current process environment.
+function Get-AiProfileHealth {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile,
+    [int]$TimeoutSec = 20,
+    [int]$DegradedMs = 8000
+  )
+
+  # Single-profile path (used by `cx doctor`, switch-time, etc.). `cc/cx health`
+  # builds plans for ALL profiles and fires requests concurrently via
+  # Invoke-AiProbeRequest directly; this wrapper stays sequential for one-off use.
+  $plan = Get-AiProfileProbePlan -Tool $Tool -Profile $Profile
+  if ($plan.ContainsKey("Early")) { return $plan.Early }
+
+  $results = @{}
+  foreach ($c in $plan.Candidates) {
+    $req = Invoke-AiProbeRequest -Url $c.Url -Headers $plan.Headers -Body $c.Body -TimeoutSec $TimeoutSec
+    Test-AiProbeBody -Req $req -Check $c.Check
+    $results[$c.Label] = $req
+  }
+  return Resolve-AiProfileHealth -Plan $plan -Results $results -DegradedMs $DegradedMs
 }
 
 # --- Health cache (on-demand only; no background scheduler) ---
@@ -1407,12 +1437,14 @@ function Get-AiProfileHealthCached {
     [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
     [Parameter(Mandatory = $true)]$Profile,
     [switch]$Fresh,
+    [switch]$CacheOnly,
     [int]$TtlSec = 300
   )
 
   $name = Get-AiProfileName -Profile $Profile
   $key = "$Tool.$name"
 
+  # Fresh cache hit short-circuits (whether or not CacheOnly).
   if (-not $Fresh) {
     $cache = Read-AiHealthCache
     if ($cache.ContainsKey($key)) {
@@ -1431,6 +1463,13 @@ function Get-AiProfileHealthCached {
         }
       }
     }
+  }
+
+  # CacheOnly: never probe (keeps `list`/`status`/switch instant — a stale or
+  # unprobed entry shows as skip ⏭, matching the lean list). Use `health` /
+  # `status --refresh` to force a live probe.
+  if ($CacheOnly) {
+    return [pscustomobject]@{ Status = "skip"; LatencyMs = 0; Method = $null; Error = $null; ProbedAt = 0; Cached = $false }
   }
 
   $result = Get-AiProfileHealth -Tool $Tool -Profile $Profile
@@ -1873,7 +1912,11 @@ function Write-CodexSwitchStatus {
     Write-Host "  Subscription quota: not exposed by Codex CLI"
   }
 
-  Write-CodexDoctorSummary -Profile $Profile
+  # Cached health line (instant — no network). `codex doctor` is deliberately
+  # NOT run here: it does live network/websocket checks that stall the switch.
+  # Use `cx doctor` for the full diagnostic on demand.
+  $h = Get-AiProfileHealthCached -Tool "codex" -Profile $Profile -CacheOnly
+  Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
 }
 
 function Write-ClaudeSwitchStatus {
@@ -1911,7 +1954,7 @@ Usage:
   cx api             Use the default API profile
   cx api:docker      Use a named API profile
   cx list            List registry profiles and local file status
-  cx status          Print current saved/process state
+  cx status          Print current saved/process state; --refresh re-probes health
   cx stats           Summarize local rollout token usage
   cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
                      Options: --base-url URL --env-key NAME --provider-name NAME
@@ -1921,7 +1964,8 @@ Usage:
   cx remove NAME     Remove a Codex profile registration
   cx probe-model NAME [MODEL]  Set/clear health-probe model (default gpt-5.4-mini)
   cx default [NAME]   Show/set the default (primary) profile
-  cx health           Probe & report profile health (🟢🟡🔴); --fresh re-probes
+  cx edit            Open the profile registry (profiles.json) in $EDITOR
+  cx health           Probe & report profile health (🟢🟡🔴, parallel); --fresh re-probes
   cx doctor           Run codex doctor full diagnostic (slow, on-demand)
   cx health-clear     Clear the health probe cache
   cx next            Cycle to the next enabled profile
@@ -1957,7 +2001,7 @@ Usage:
   cc api             Use the default API profile
   cc api:docker      Use a named API profile
   cc list            List registry profiles and local file status
-  cc status          Print current saved/process state
+  cc status          Print current saved/process state; --refresh re-probes health
   cc add-api NAME    Register a Claude Code API profile
                      Options: --base-url URL --env-key NAME --env KEY=VALUE (repeatable)
                      Prompts for missing base-url and the secret in a terminal.
@@ -1965,7 +2009,8 @@ Usage:
   cc remove NAME     Remove a Claude Code profile registration
   cc probe-model NAME [MODEL]  Set/clear health-probe model (default claude-3-5-haiku)
   cc default [NAME]   Show/set the default (primary) profile
-  cc health           Probe & report profile health (🟢🟡🔴); --fresh re-probes
+  cc edit            Open the profile registry (profiles.json) in $EDITOR
+  cc health           Probe & report profile health (🟢🟡🔴, parallel); --fresh re-probes
   cc health-clear     Clear the health probe cache
   cc next            Cycle to the next enabled profile
   cc help            Show this help
@@ -2099,8 +2144,17 @@ function Get-AiHealthyProfileName {
   $ordered = if ($defaultProfile) { @($defaultProfile) + $others } else { $others }
 
   foreach ($p in $ordered) {
-    $h = Get-AiProfileHealthCached -Tool $Tool -Profile $p
-    if ($h.Status -ne "down") { return (Get-AiProfileName -Profile $p) }
+    # Cache-only: no-arg cc/cx must stay instant. If the cache is empty/stale
+    # every entry reads skip (not "down"), so the default is chosen without
+    # probing. Run `cc health` first to populate health for auto-failover.
+    $h = Get-AiProfileHealthCached -Tool $Tool -Profile $p -CacheOnly
+    $mode = Get-AiProfileMode -Profile $p
+    # Subscription profiles need no probe -> usable. For api profiles, require a
+    # cached POSITIVE signal (healthy/degraded); an unprobed api profile reads
+    # "skip" and is NOT auto-selected. Run `cc health` first to populate health.
+    if ($mode -eq "sub" -or $h.Status -eq "healthy" -or $h.Status -eq "degraded") {
+      return (Get-AiProfileName -Profile $p)
+    }
   }
   return $defaultName
 }
@@ -2256,15 +2310,103 @@ function Show-ClaudeList {
 function Show-AiHealth {
   param(
     [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
-    [switch]$Fresh
+    [switch]$Fresh,
+    [int]$DegradedMs = 8000,
+    [int]$TimeoutSec = 10
   )
   Sync-AiHealthCache -Tool $Tool
   $label = if ($Tool -eq "codex") { "Codex" } else { "Claude Code" }
   Write-Host "$label profile health ($script:AiRegistryPath):"
   $saved = Get-AiSavedProfileName -Tool $Tool
-  $rows = foreach ($p in Get-AiToolProfiles -Tool $Tool) {
+
+  # Phase 1 (instant): build a plan per profile. Cache hits (and Early/short-
+  # circuit plans) are resolved immediately; only stale/missing profiles queue
+  # real requests. Gathering every request up front lets Phase 2 fire them all
+  # at once instead of probing serially (which made `cc health` wait on each
+  # slow relay one after another).
+  $profiles = @(Get-AiToolProfiles -Tool $Tool)
+  $tasks = [System.Collections.Generic.List[object]]::new()
+  $final = @{}            # name -> health result
+  $plans = @{}            # name -> plan (for verdict)
+  foreach ($p in $profiles) {
     $n = Get-AiProfileName -Profile $p
-    $h = Get-AiProfileHealthCached -Tool $Tool -Profile $p -Fresh:$Fresh
+    $plan = Get-AiProfileProbePlan -Tool $Tool -Profile $p
+    if ($plan.ContainsKey("Early")) {
+      $final[$n] = $plan.Early
+      continue
+    }
+    $plans[$n] = $plan
+    if (-not $Fresh) {
+      $cached = Get-AiProfileHealthCached -Tool $Tool -Profile $p -CacheOnly
+      if ($cached.Cached) { $final[$n] = $cached; continue }
+    }
+    foreach ($c in $plan.Candidates) {
+      $tasks.Add([pscustomobject]@{
+        Name = $n; Label = $c.Label; Url = $c.Url; Headers = $plan.Headers; Body = $c.Body; Check = $c.Check
+      })
+    }
+  }
+
+  # Phase 2 (concurrent): fire every queued request in parallel. The script
+  # block uses ONLY builtin cmdlets/types (Invoke-RestMethod, Stopwatch) so it
+  # does not need the engine's functions in each child runscape. Invoke-
+  # RestMethod, not Invoke-WebRequest, avoids the PS7 stall seen on some relays.
+  # IMPORTANT: the body is validated INSIDE the block. Objects crossing a
+  # ForEach-Object -Parallel runsape boundary get XML-serialized, so a returned
+  # parsed body's arrays no longer satisfy `-is [array]` in the parent — which
+  # produced false "200 but no generated content". Validating before return and
+  # sending back only primitives (Ok/Code/LatencyMs/Detail) sidesteps that.
+  if ($tasks.Count -gt 0) {
+    $to = $TimeoutSec
+    $fired = $tasks | Microsoft.PowerShell.Core\ForEach-Object -Parallel {
+      $t = $_; $timeout = $using:to
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      $r = [pscustomobject]@{ Name = $t.Name; Label = $t.Label; Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
+      try {
+        $j = Invoke-RestMethod -Uri $t.Url -Method Post -Headers $t.Headers -Body $t.Body `
+          -ContentType "application/json" -TimeoutSec $timeout -ErrorAction Stop
+        $sw.Stop()
+        $r.Code = 200; $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+        $valid = $false
+        switch ($t.Check) {
+          "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
+          "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
+          "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
+        }
+        $r.Ok = $valid
+        if (-not $valid) { $r.Detail = "200 but no generated content" }
+      } catch {
+        $sw.Stop()
+        $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+        if ($_.Exception.Response) { $r.Code = [int]$_.Exception.Response.StatusCode; $r.Detail = "HTTP " + $r.Code }
+        else { $r.Detail = $_.Exception.Message }
+      }
+      $r
+    } -ThrottleLimit ([Math]::Max(8, $tasks.Count))
+
+    # Phase 3 (instant): group per profile, resolve verdict, cache. Sequential
+    # + cheap (no network, no cache-write race). Ok is already set per request.
+    $byProfile = @{}
+    foreach ($r in $fired) {
+      if (-not $byProfile.ContainsKey($r.Name)) { $byProfile[$r.Name] = @{} }
+      $byProfile[$r.Name][$r.Label] = $r
+    }
+    foreach ($n in $plans.Keys) {
+      if ($final.ContainsKey($n)) { continue }
+      $results = $byProfile[$n]
+      if (-not $results) { continue }
+      $h = Resolve-AiProfileHealth -Plan $plans[$n] -Results $results -DegradedMs $DegradedMs
+      $final[$n] = $h
+      $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+      Write-AiHealthCacheEntry -Key "$Tool.$n" -Entry ([pscustomobject]@{
+          status = $h.Status; latencyMs = $h.LatencyMs; method = $h.Method; error = $h.Error; probedAt = $now
+        })
+    }
+  }
+
+  $rows = foreach ($p in $profiles) {
+    $n = Get-AiProfileName -Profile $p
+    $h = $final[$n]
     [pscustomobject]@{
       Sel    = if ($n -eq $saved) { "*" } else { " " }
       Name   = $n
@@ -2274,10 +2416,11 @@ function Show-AiHealth {
     }
   }
   $rows | Format-Table -AutoSize
-  Write-Host ("  (health " + ($(if ($Fresh) { "re-probed (fresh)" } else { "cached <=5min" })) + "; '" + $Tool + " health --fresh' re-probe, '" + $Tool + " health-clear' clears)") -ForegroundColor DarkGray
+  Write-Host ("  (health " + ($(if ($Fresh) { "re-probed (fresh, parallel)" } else { "cached <=5min" })) + "; '" + $Tool + " health --fresh' re-probe, '" + $Tool + " health-clear' clears)") -ForegroundColor DarkGray
 }
 
 function Show-CodexStatus {
+  param([switch]$Fresh)
   $saved = Get-AiSavedProfileName -Tool "codex"
   $profile = Get-AiProfileByName -Tool "codex" -Name ($env:AI_CODEX_LABEL ?? $saved)
   if (-not $profile) {
@@ -2295,7 +2438,7 @@ function Show-CodexStatus {
   Write-Host "  OPENAI_API_KEY: $(Format-AiSecretPreview $env:OPENAI_API_KEY)"
   Write-Host "  Cached login: $(Get-CodexLoginStatusText)"
   if ($profile) {
-    $h = Get-AiProfileHealthCached -Tool "codex" -Profile $profile
+    $h = Get-AiProfileHealthCached -Tool "codex" -Profile $profile -Fresh:$Fresh -CacheOnly:(-not $Fresh)
     Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
   }
 }
@@ -2312,6 +2455,7 @@ function Show-CodexDoctor {
 }
 
 function Show-ClaudeStatus {
+  param([switch]$Fresh)
   $saved = Get-AiSavedProfileName -Tool "claude"
   Write-Host "Claude Code state:"
   Write-Host "  Registry: $script:AiRegistryPath"
@@ -2324,7 +2468,7 @@ function Show-ClaudeStatus {
   $cprofile = Get-AiProfileByName -Tool "claude" -Name ($env:AI_CLAUDE_LABEL ?? $saved)
   if (-not $cprofile) { $cprofile = Get-AiProfileByName -Tool "claude" -Name (Get-AiDefaultProfileName -Tool "claude") }
   if ($cprofile) {
-    $h = Get-AiProfileHealthCached -Tool "claude" -Profile $cprofile
+    $h = Get-AiProfileHealthCached -Tool "claude" -Profile $cprofile -Fresh:$Fresh -CacheOnly:(-not $Fresh)
     Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
   }
   Write-ClaudeExternalStatus
@@ -2718,6 +2862,23 @@ function Edit-AiMcpRegistry {
   & $parts[0] @rest
 }
 
+# `cc edit` / `cx edit` — jump straight to the profile registry (profiles.json),
+# where base_url, model, probe_model, probe_ua, mode etc. live for every profile.
+# Non-blocking: strips --wait so GUI editors (cursor/code) open and return.
+function Edit-AiRegistry {
+  $path = $script:AiRegistryPath
+  if (-not (Test-Path -LiteralPath $path)) {
+    Write-Host "Registry not found: $path"
+    return
+  }
+  $editor = if ($env:EDITOR) { $env:EDITOR } elseif ($env:VISUAL) { $env:VISUAL } elseif ($IsWindows) { 'notepad' } else { 'vi' }
+  $parts = @($editor -split '\s+' | Where-Object { $_ -and $_ -notin @('--wait', '-w') })
+  if ($parts.Count -eq 0) { $parts = @('notepad') }
+  $rest = @(); if ($parts.Count -gt 1) { $rest = @($parts[1..($parts.Count - 1)]) }; $rest += $path
+  Write-Host "Opening $path with $($parts[0]) ..."
+  & $parts[0] @rest
+}
+
 function Show-AiMcpHelp {
   @'
 mcp - manage MCP servers across Claude Code & Codex from ~/.ai-env/mcp.toml
@@ -2756,8 +2917,9 @@ function cx {
     switch (($remaining[0] ?? "").ToString().ToLowerInvariant()) {
       { $_ -in @("help", "-h", "--help", "/?") } { Show-CxHelp; return }
       "list" { Show-CodexList; return }
-      "status" { Show-CodexStatus; return }
+      "status" { Show-CodexStatus -Fresh:(Test-AiFreshFlag ($remaining | Select-Object -Skip 1)); return }
       "doctor" { Show-CodexDoctor; return }
+      "edit" { Edit-AiRegistry; return }
       "health" { Show-AiHealth -Tool "codex" -Fresh:(Test-AiFreshFlag ($remaining | Select-Object -Skip 1)); return }
       "stats" { Show-CodexStats -Arguments @($remaining | Select-Object -Skip 1); return }
       "add-api" { Add-CodexApiProfile -Arguments @($remaining | Select-Object -Skip 1); return }
@@ -2801,7 +2963,8 @@ function cc {
     switch (($remaining[0] ?? "").ToString().ToLowerInvariant()) {
       { $_ -in @("help", "-h", "--help", "/?") } { Show-CcHelp; return }
       "list" { Show-ClaudeList; return }
-      "status" { Show-ClaudeStatus; return }
+      "status" { Show-ClaudeStatus -Fresh:(Test-AiFreshFlag ($remaining | Select-Object -Skip 1)); return }
+      "edit" { Edit-AiRegistry; return }
       "health" { Show-AiHealth -Tool "claude" -Fresh:(Test-AiFreshFlag ($remaining | Select-Object -Skip 1)); return }
       "add-api" { Add-ClaudeApiProfile -Arguments @($remaining | Select-Object -Skip 1); return }
       "add-sub" { Add-ClaudeSubProfile -Arguments @($remaining | Select-Object -Skip 1); return }
