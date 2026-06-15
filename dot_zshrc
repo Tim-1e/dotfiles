@@ -8,6 +8,12 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/cargo/bin:$PATH"
 export VISUAL=nano
 export EDITOR=nano
 
+# Locale / terminal — avoids locale warnings in minimal Linux/docker shells.
+export LANG=C.UTF-8
+export LC_CTYPE=C.UTF-8
+export TERM="${TERM:-xterm-256color}"
+unset LC_ALL
+
 if [ -f "$ZSH/oh-my-zsh.sh" ]; then
   source "$ZSH/oh-my-zsh.sh"
 fi
@@ -60,6 +66,13 @@ export FZF_DEFAULT_OPTS='--height=40% --layout=reverse --border'
 export FZF_CTRL_T_OPTS="--preview 'batcat --color=always {} 2>/dev/null || bat --color=always {} 2>/dev/null || command cat {}'"
 export FZF_ALT_C_OPTS="--preview 'eza --tree --level=2 --icons {} 2>/dev/null || ls -la {}'"
 
+if [ -f "$HOME/.claude/auth.env" ]; then
+  set -a
+  . "$HOME/.claude/auth.env"
+  set +a
+fi
+
+# AI environment profile wrappers managed by dotfiles.
 if [ -f "$HOME/.local/share/ai-env/ai-env.sh" ]; then
   source "$HOME/.local/share/ai-env/ai-env.sh"
 fi
@@ -81,6 +94,9 @@ act() {
     source "$HOME/pyenvs/$1/bin/activate"
   fi
 }
+
+# Run Claude with permissions auto-skipped (convenience wrapper).
+alias claude='claude --dangerously-skip-permissions'
 
 # No proxy Set
 alias codex-np='env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY -u http_proxy -u https_proxy -u all_proxy -u no_proxy codex'
