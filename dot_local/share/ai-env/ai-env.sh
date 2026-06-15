@@ -1669,15 +1669,25 @@ for(const x of r[tool]||[])console.log(JSON.stringify(x));
   local count=$idx
 
   # Render header + rows from the live arrays (bash dynamic scoping lets a
-  # nested function read the caller's locals).
+  # nested function read the caller's locals). $1=dots for pending spinner
+  # (0 => none); $2=1 => clear-mode (each line prefixed with \r + clear-line,
+  # for in-place redraw after the caller moved the cursor up).
   _render() {
-    local i sel
-    printf '%-3s %-14s %-10s %-12s %s\n' "Sel" "Name" "Health" "Method" "Note"
-    printf '%-3s %-14s %-10s %-12s %s\n' "---" "----" "------" "------" "----"
+    local dots="${1:-0}" clear="${2:-0}" i sel cell method note pref dots_str k
+    if [ "$clear" = "1" ]; then pref=$'\r\033[K'; else pref=""; fi
+    dots_str=""; k=0
+    while [ "$k" -lt "$dots" ]; do dots_str="$dots_str."; k=$((k+1)); done
+    printf '%s%-3s %-14s %-9s %-11s %s\n' "$pref" "Sel" "Name" "Health" "Method" "Note"
+    printf '%s%-3s %-14s %-9s %-11s %s\n' "$pref" "---" "----" "------" "------" "----"
     i=0
     while [ "$i" -lt "$count" ]; do
+      if [ "${_pending[$i]}" = "1" ] && [ "$dots" -gt 0 ]; then
+        cell="⏳"; method="-"; note="waiting ⏳$dots_str"
+      else
+        cell="${_cell[$i]}"; method="${_method[$i]}"; note="${_note[$i]}"
+      fi
       [ "${_nms[$i]}" = "$saved" ] && sel="*" || sel=" "
-      printf '%-3s %-14s %-10s %-12s %s\n' "$sel" "${_nms[$i]}" "${_cell[$i]}" "${_method[$i]}" "${_note[$i]}"
+      printf '%s%-3s %-14s %-9s %-11s %s\n' "$pref" "$sel" "${_nms[$i]}" "$cell" "$method" "$note"
       i=$((i+1))
     done
   }
@@ -1704,29 +1714,51 @@ for(const x of r[tool]||[])console.log(JSON.stringify(x));
     i=$((i+1))
   done
 
-  # Stream each result as its background probe finishes (poll), then a final
-  # registry-ordered table. One line per completion — terminal-safe, no ANSI
-  # in-place redraw (which can deadlock/glitch an interactive terminal).
-  if [ "$pending_count" -gt 0 ]; then
-    printf '  probing %s profile(s) in parallel (results stream as they resolve)…\n' "$pending_count"
-    local remaining=$pending_count
+  # Live (TTY): redraw the table in place with an animated spinner; the
+  # foreground polls every 300ms (only writer, so no host contention) and only
+  # uses relative cursor-up (\033[<n>A) — not save/restore, which glitched.
+  # Non-TTY (pipes/CI): stream one line per completion, then a final table.
+  local live=0
+  [ "$pending_count" -gt 0 ] && { [ -t 1 ] || [ "${AI_HEALTH_LIVE:-}" = "1" ]; } && live=1
+
+  if [ "$live" = "1" ]; then
+    local nlines=$((2 + count))
+    local tick=0 remaining=$pending_count dots
+    _render 1 0
     while [ "$remaining" -gt 0 ]; do
-      sleep 0.2
+      sleep 0.3
+      tick=$((tick+1))
+      dots=$(( (tick % 7) + 1 ))
       i=0
       while [ "$i" -lt "$count" ]; do
         if [ "${_pending[$i]}" = "1" ] && [ -s "$tmpdir/$i.probe" ]; then
-          _apply_result "$i"
-          _pending[$i]=0
-          remaining=$((remaining-1))
-          printf '    %s %-14s %s\n' "${_cell[$i]}" "${_nms[$i]}" "${_note[$i]}"
+          _apply_result "$i"; _pending[$i]=0; remaining=$((remaining-1))
         fi
         i=$((i+1))
       done
+      printf '\033[%dA' "$nlines"
+      _render "$dots" 1
     done
+  else
+    if [ "$pending_count" -gt 0 ]; then
+      printf '  probing %s profile(s) in parallel (results stream as they resolve)…\n' "$pending_count"
+      local remaining=$pending_count
+      while [ "$remaining" -gt 0 ]; do
+        sleep 0.2
+        i=0
+        while [ "$i" -lt "$count" ]; do
+          if [ "${_pending[$i]}" = "1" ] && [ -s "$tmpdir/$i.probe" ]; then
+            _apply_result "$i"; _pending[$i]=0; remaining=$((remaining-1))
+            printf '    %s %-14s %s\n' "${_cell[$i]}" "${_nms[$i]}" "${_note[$i]}"
+          fi
+          i=$((i+1))
+        done
+      done
+    fi
+    wait 2>/dev/null
+    _render 0 0
   fi
-  wait 2>/dev/null
   rm -rf "$tmpdir"
-  _render
   echo "  (health $( [ "$fresh" = 1 ] && echo 're-probed (fresh, parallel)' || echo 'cached <=5min'); ${tool} health --fresh re-probe, ${tool} health-clear clears)"
 }
 

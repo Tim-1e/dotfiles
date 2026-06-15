@@ -2417,14 +2417,101 @@ function Show-AiHealth {
   }
 
   $footer = "  (health " + ($(if ($Fresh) { "re-probed (fresh, parallel)" } else { "cached <=5min" })) + "; '" + $Tool + " health --fresh' re-probe, '" + $Tool + " health-clear' clears)"
+  $titleStr = "$label profile health ($script:AiRegistryPath):"
+  $pendingNames = @($expected.Keys)
+  $isTty = (-not [Console]::IsOutputRedirected) -or ($env:AI_HEALTH_LIVE -eq '1')
 
-  Write-Host "$label profile health ($script:AiRegistryPath):"
+  if ($pendingNames.Count -gt 0 -and $isTty) {
+    # === Animated in-place table (TTY only) ===
+    # Probes run in background runsapes (concurrency); the FOREGROUND ticks every
+    # 300ms and redraws the table with [Console]::Write + relative cursor-up
+    # (\e[<n>A). Only the main thread writes to the console, so there's no host
+    # contention (the earlier in-place attempt used \e7/\e8 save-restore + Write-
+    # Host in a ForEach-Object -Parallel consumer, which deadlocked). Pending rows
+    # show "waiting ⏳" + dots cycling 1..7; each row fills when its probe lands.
+    $esc = [char]27
+    $probeScriptStr = @'
+param($Candidates, $Headers, $TimeoutSec)
+$out = New-Object System.Collections.ArrayList
+foreach ($c in $Candidates) {
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $r = [pscustomobject]@{ Label = $c.Label; Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
+  try {
+    $j = Invoke-RestMethod -Uri $c.Url -Method Post -Headers $Headers -Body $c.Body -ContentType "application/json" -TimeoutSec $TimeoutSec -ErrorAction Stop
+    $sw.Stop(); $r.Code = 200; $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+    $valid = $false
+    switch ($c.Check) {
+      "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
+      "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
+      "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
+    }
+    $r.Ok = $valid; if (-not $valid) { $r.Detail = "200 but no generated content" }
+  } catch {
+    $sw.Stop(); $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+    if ($_.Exception.Response) { $r.Code = [int]$_.Exception.Response.StatusCode; $r.Detail = "HTTP " + $r.Code } else { $r.Detail = $_.Exception.Message }
+  }
+  [void]$out.Add($r)
+}
+, $out
+'@
+    $runspaces = @{}
+    try {
+      foreach ($n in $pendingNames) {
+        $plan = $plans[$n]
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript($probeScriptStr).AddArgument(@($plan.Candidates)).AddArgument($plan.Headers).AddArgument($TimeoutSec)
+        $runspaces[$n] = @{ PS = $ps; Handle = $ps.BeginInvoke(); Plan = $plan }
+      }
 
-  # Probe concurrently and STREAM each result as it lands — one Write-Host line
-  # per completed profile (fastest first). This is the watchdog/live feel the
-  # user asked for, and it is terminal-safe: no ANSI cursor save/restore and no
-  # in-place redraw (those can deadlock an interactive host with ForEach-Object
-  # -Parallel, or mis-render under conhost). A final aligned table follows.
+      $buildLines = {
+        $tick = [int][math]::Floor($sw.ElapsedMilliseconds / 400)
+        $dots = ($tick % 7) + 1
+        $lines = @()
+        $lines += ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f "Sel", "Name", "Health", "Method", "Note")
+        $lines += ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f "---", "----", "------", "------", "----")
+        foreach ($p in $profiles) {
+          $nn = Get-AiProfileName -Profile $p
+          $d = $display[$nn]; if (-not $d) { $d = @{ Health = "?"; Method = "-"; Note = ""; Pending = $false } }
+          if ($d.Pending) { $cell = "⏳"; $method = "-"; $note = "waiting ⏳" + ("." * $dots) }
+          else { $cell = $d.Health; $method = $d.Method; $note = $d.Note }
+          if ($note.Length -gt 48) { $note = $note.Substring(0, 48) }
+          $sel = if ($nn -eq $saved) { "*" } else { " " }
+          $lines += ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f $sel, $nn, $cell, $method, $note)
+        }
+        $lines
+      }
+
+      [Console]::WriteLine($titleStr)
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      $nlines = (& $buildLines).Count
+      foreach ($l in & $buildLines) { [Console]::Write($l + "`n") }
+      while ($pendingNames.Count -gt 0) {
+        Start-Sleep -Milliseconds 300
+        $done = @()
+        foreach ($n in $pendingNames) {
+          if ($runspaces[$n].Handle.IsCompleted) {
+            $raw = $runspaces[$n].PS.EndInvoke($runspaces[$n].Handle)
+            $results = @{}; foreach ($r in $raw) { $results[$r.Label] = $r }
+            $h = Resolve-AiProfileHealth -Plan $runspaces[$n].Plan -Results $results -DegradedMs $DegradedMs
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-AiHealthCacheEntry -Key "$Tool.$n" -Entry ([pscustomobject]@{ status = $h.Status; latencyMs = $h.LatencyMs; method = $h.Method; error = $h.Error; probedAt = $now })
+            $display[$n] = @{ Health = (Format-AiHealthCell $h); Method = ($(if ($h.Method) { $h.Method } else { "-" })); Note = ($(if ($h.Error) { $h.Error } else { "" })); Pending = $false }
+            $done += $n
+          }
+        }
+        if ($done.Count -gt 0) { $pendingNames = @($pendingNames | Where-Object { $_ -notin $done }) }
+        [Console]::Write($esc + "[" + $nlines + "A")
+        foreach ($l in & $buildLines) { [Console]::Write("`r" + $esc + "[K" + $l + "`n") }
+      }
+    } finally {
+      foreach ($n in $expected.Keys) { if ($runspaces[$n] -and $runspaces[$n].PS) { $runspaces[$n].PS.Dispose() } }
+    }
+    [Console]::WriteLine($footer)
+    return
+  }
+
+  # === Streaming fallback (pipes / CI / non-TTY): one line per completion ===
+  Write-Host $titleStr
   if ($tasks.Count -gt 0) {
     $probeProfileCount = 0
     foreach ($n in $expected.Keys) { $probeProfileCount += 1 }
