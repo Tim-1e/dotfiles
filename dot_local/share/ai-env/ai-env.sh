@@ -1432,7 +1432,7 @@ codex() {
 # Real-wire probe (node https), TTL cache (~/.ai-env/health.json), on-demand.
 AI_HEALTH_PATH="${AI_CONFIG_DIR}/health.json"
 AI_HEALTH_TTL="${AI_HEALTH_TTL:-300}"
-AI_HEALTH_DEGRADED_MS="${AI_HEALTH_DEGRADED_MS:-6000}"
+AI_HEALTH_DEGRADED_MS="${AI_HEALTH_DEGRADED_MS:-8000}"
 AI_MCP_PATH="${AI_CONFIG_DIR}/mcp.toml"
 
 _ai_claude_json_path() { printf '%s\n' "${AI_CLAUDE_JSON_PATH:-$HOME/.claude.json}"; }
@@ -1446,7 +1446,7 @@ _ai_probe_health() {
   node -e '
 const fs=require("fs"),https=require("https"),http=require("http"),{URL}=require("url");
 const tool=process.argv[1],P=JSON.parse(process.argv[2]),secretsPath=process.argv[3],router=process.argv[4];
-const degradedMs=Number(process.env.AI_HEALTH_DEGRADED_MS||6000);
+const degradedMs=Number(process.env.AI_HEALTH_DEGRADED_MS||8000);
 const out=(o)=>process.stdout.write(JSON.stringify(o));
 const mode=P.mode||"sub";
 if(mode!=="api"){out({status:"skip",latencyMs:0,method:null,error:"subscription mode (no remote probe)"});process.exit(0);}
@@ -1456,8 +1456,8 @@ const tomlStr=(file,key)=>{if(!fs.existsSync(file))return"";const re=new RegExp(
 const legacyEnv={};const legacy=expand(P.linux_secret||P.secret||"");if(legacy&&fs.existsSync(legacy)){for(const line of fs.readFileSync(legacy,"utf8").split(/\r?\n/)){const m=line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(m)legacyEnv[m[1]]=m[2].trim();}}
 const secrets=parseSecrets(secretsPath);const sid=P.secret_id||(tool+"."+P.name);const sec=secrets[sid]||{};
 let baseOrigin="",headers={},probeModel="",secretOk=false;
-if(tool==="claude"){probeModel=P.probe_model||"claude-3-5-haiku-20241022";let b=sec.ANTHROPIC_BASE_URL||legacyEnv.ANTHROPIC_BASE_URL||P.base_url||router;baseOrigin=b.replace(/\/+$/,"");const at=sec.ANTHROPIC_AUTH_TOKEN||legacyEnv.ANTHROPIC_AUTH_TOKEN||process.env.ANTHROPIC_AUTH_TOKEN||"";const ak=sec.ANTHROPIC_API_KEY||legacyEnv.ANTHROPIC_API_KEY||process.env.ANTHROPIC_API_KEY||"";headers={"anthropic-version":"2023-06-01"};if(at)headers["Authorization"]="Bearer "+at;if(ak)headers["x-api-key"]=ak;secretOk=!!(at||ak);
-}else{probeModel=P.probe_model||"gpt-5.4-mini";const profPath=expand((P.home||"~/.codex")+"/"+(P.codex_profile||P.profile||String(P.name||"").replace(":","-"))+".config.toml");let b=tomlStr(profPath,"base_url");if(!b)b=tomlStr(expand(P.home||"~/.codex")+"/config.toml","openai_base_url");if(!b)b="built-in OpenAI/ChatGPT endpoint";baseOrigin=b.replace(/\/+$/,"");const k=sec.OPENAI_API_KEY||sec.CODEX_API_KEY||legacyEnv.OPENAI_API_KEY||"";headers=k?{"Authorization":"Bearer "+k}:{};secretOk=!!k;}
+if(tool==="claude"){probeModel=P.probe_model||"claude-3-5-haiku-20241022";let b=sec.ANTHROPIC_BASE_URL||legacyEnv.ANTHROPIC_BASE_URL||P.base_url||router;baseOrigin=b.replace(/\/+$/,"");const at=sec.ANTHROPIC_AUTH_TOKEN||legacyEnv.ANTHROPIC_AUTH_TOKEN||process.env.ANTHROPIC_AUTH_TOKEN||"";const ak=sec.ANTHROPIC_API_KEY||legacyEnv.ANTHROPIC_API_KEY||process.env.ANTHROPIC_API_KEY||"";headers={"anthropic-version":"2023-06-01"};if(at)headers["Authorization"]="Bearer "+at;if(ak)headers["x-api-key"]=ak;headers["User-Agent"]=P.probe_ua||"claude-cli/1.0.119 (external, cli)";secretOk=!!(at||ak);
+}else{probeModel=P.probe_model||"gpt-5.4-mini";const profPath=expand((P.home||"~/.codex")+"/"+(P.codex_profile||P.profile||String(P.name||"").replace(":","-"))+".config.toml");let b=tomlStr(profPath,"base_url");if(!b)b=tomlStr(expand(P.home||"~/.codex")+"/config.toml","openai_base_url");if(!b)b="built-in OpenAI/ChatGPT endpoint";baseOrigin=b.replace(/\/+$/,"");const k=sec.OPENAI_API_KEY||sec.CODEX_API_KEY||legacyEnv.OPENAI_API_KEY||"";headers=k?{"Authorization":"Bearer "+k}:{};headers["User-Agent"]=P.probe_ua||"codex_cli_rs/0.40.0 (external, cli)";secretOk=!!k;}
 if(!baseOrigin||/^built-in/.test(baseOrigin)){out({status:"down",latencyMs:0,method:"none",error:"missing base_url"});process.exit(0);}
 if(!secretOk){out({status:"down",latencyMs:0,method:"none",error:"missing credentials"});process.exit(0);}
 let urls=[];

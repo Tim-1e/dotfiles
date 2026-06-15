@@ -1177,6 +1177,10 @@ function Get-AiProfileProbeTarget {
     $headers = @{ "anthropic-version" = "2023-06-01" }
     if ($authToken) { $headers["Authorization"] = "Bearer $authToken" }
     if ($apiKey) { $headers["x-api-key"] = $apiKey }
+    # Some relays gate on User-Agent (e.g. AixHan rejects unknown clients with a
+    # 400 "Client not allowed ..."). Identify as the real Claude Code CLI so the
+    # probe sees what an actual session sees. Override per-profile via `probe_ua`.
+    $headers["User-Agent"] = [string](Get-AiProperty -Object $Profile -Name "probe_ua" -Default "claude-cli/1.0.119 (external, cli)")
 
     $result.BaseOrigin = $baseUrl
     $result.Headers = $headers
@@ -1201,6 +1205,8 @@ function Get-AiProfileProbeTarget {
 
   $result.BaseOrigin = (Get-CodexBaseUrl -Profile $Profile)
   $result.Headers = if ($apiKey) { @{ "Authorization" = "Bearer $apiKey" } } else { @{} }
+  # Identify as the real Codex CLI for relays that gate on User-Agent.
+  $result.Headers["User-Agent"] = [string](Get-AiProperty -Object $Profile -Name "probe_ua" -Default "codex_cli_rs/0.40.0 (external, cli)")
   $result.SecretOk = [bool]$apiKey
   $result.SecretLabel = if ($apiKey) { "$script:AiSecretsPath#$secretId" } else { "<none>" }
 
@@ -1221,7 +1227,7 @@ function Get-AiProfileHealth {
     [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
     [Parameter(Mandatory = $true)]$Profile,
     [int]$TimeoutSec = 20,
-    [int]$DegradedMs = 6000
+    [int]$DegradedMs = 8000
   )
 
   $mode = Get-AiProfileMode -Profile $Profile
@@ -1282,26 +1288,24 @@ function Get-AiProfileHealth {
     $sw.Restart()
     $r = [pscustomobject]@{ Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
     try {
-      $resp = Invoke-WebRequest -Uri $c.Url -Method Post -Headers $target.Headers -Body $c.Body `
+      # Use Invoke-RestMethod (not Invoke-WebRequest): IWR buffers + post-processes
+      # the whole response and hangs to timeout on some relays under PS7
+      # (e.g. sub2api.projectk.org timed out at 20s via IWR but returned in ~5s
+      # via IRM). IRM returns the parsed object directly; a non-throwing call is
+      # always a 2xx.
+      $j = Invoke-RestMethod -Uri $c.Url -Method Post -Headers $target.Headers -Body $c.Body `
         -ContentType "application/json" -TimeoutSec $TimeoutSec -ErrorAction Stop
       $sw.Stop()
-      $r.Code = [int]$resp.StatusCode
+      $r.Code = 200
       $r.LatencyMs = [int]$sw.ElapsedMilliseconds
-      if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) {
-        $valid = $false
-        try {
-          $j = $resp.Content | ConvertFrom-Json -ErrorAction Stop
-          switch ($c.Check) {
-            "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
-            "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
-            "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
-          }
-        } catch { $r.Detail = "200 but unparseable body" }
-        $r.Ok = $valid
-        if (-not $valid -and -not $r.Detail) { $r.Detail = "200 but no generated content" }
-      } else {
-        $r.Detail = "HTTP $($resp.StatusCode)"
+      $valid = $false
+      switch ($c.Check) {
+        "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
+        "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
+        "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
       }
+      $r.Ok = $valid
+      if (-not $valid) { $r.Detail = "200 but no generated content" }
     } catch {
       $sw.Stop()
       $r.LatencyMs = [int]$sw.ElapsedMilliseconds
