@@ -24,6 +24,7 @@ jobs:
             scripts/install/user-bins.sh \
             scripts/install/zsh.sh \
             scripts/install/rust-tools.sh \
+            scripts/install/modern-cli.sh \
             scripts/install/fastfetch.sh \
             scripts/install/fonts.sh \
             test/smoke.sh \
@@ -79,6 +80,7 @@ jobs:
             scripts/install/user-bins.sh \
             scripts/install/zsh.sh \
             scripts/install/rust-tools.sh \
+            scripts/install/modern-cli.sh \
             scripts/install/fastfetch.sh \
             scripts/install/fonts.sh \
             test/smoke.sh \

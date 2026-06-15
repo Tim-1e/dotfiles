@@ -81,6 +81,13 @@ else
   warn_command lolcrab
 fi
 
+# Modern CLI tools (scripts/install/modern-cli.sh) are best-effort user-level
+# downloads — warn (don't fail) so a transient network/rate-limit blip can't
+# break the smoke check.
+for _mcli in rg fd jq yq delta dust duf sd tldr procs xh gping btop; do
+  warn_command "$_mcli"
+done
+
 if command -v zsh >/dev/null 2>&1; then
   zsh -ic 'echo zsh-ok'
 fi

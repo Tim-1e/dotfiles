@@ -59,6 +59,27 @@ elif command -v batcat >/dev/null 2>&1; then
   alias cat='batcat'
 fi
 
+# Modern CLI replacements (installed user-level into ~/.local/bin by
+# scripts/install/modern-cli.sh). Only clobber a builtin when the replacement
+# is a safe interactive drop-in; rg/fd/sd/jq/yq/xh/delta stay as their own
+# commands (NOT aliased over grep/find/sed) because their flags differ and
+# aliasing them would break scripts and muscle memory.
+command -v dust  >/dev/null 2>&1 && alias du='dust'
+command -v duf   >/dev/null 2>&1 && alias df='duf'
+command -v procs >/dev/null 2>&1 && alias ps='procs'
+command -v gping >/dev/null 2>&1 && alias ping='gping'
+if command -v btop >/dev/null 2>&1; then
+  alias top='btop'
+  alias htop='btop'
+fi
+
+# Use fd for fzf's file/dir walks when available (faster, respects .gitignore).
+if command -v fd >/dev/null 2>&1; then
+  export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+  export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+  export FZF_ALT_C_COMMAND='fd --type d --hidden --follow --exclude .git'
+fi
+
 source /usr/share/doc/fzf/examples/key-bindings.zsh 2>/dev/null || true
 source /usr/share/doc/fzf/examples/completion.zsh 2>/dev/null || true
 

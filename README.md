@@ -82,6 +82,9 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
 - Oh My Zsh plus `zsh-autosuggestions` and `zsh-syntax-highlighting`
 - zoxide, TPM, rustup, uv
 - cargo tools: `eza`, `bat`, `lolcrab`
+- modern CLI tools as user-level binaries in `~/.local/bin` (no root needed):
+  `rg`, `fd`, `jq`, `yq`, `delta`, `dust`, `duf`, `sd`, `tldr`, `procs`, `xh`,
+  `gping`, `btop` — see [Modern CLI tools](#modern-cli-tools)
 - latest fastfetch release into `~/.local/bin`
 - Node.js and npm by default when system package installation is enabled
 - 0xProto Nerd Fonts into the current user's font directory
@@ -102,6 +105,41 @@ execute.
 On older Linux systems with old glibc, the latest fastfetch prebuilt binary may
 be incompatible. The installer falls back to fastfetch's polyfilled Linux binary
 when available, then skips fastfetch instead of failing the whole apply.
+
+## Modern CLI tools
+
+`scripts/install/modern-cli.sh` installs a set of modern, lightweight CLI tools
+as **user-level** prebuilt binaries into `~/.local/bin` — no root or `sudo`, the
+same approach as `fzf`/`eza`. Each tool is best-effort: a download or extract
+failure prints a `Skipping …` line and never aborts the apply, and any tool
+already on `PATH` is left untouched.
+
+| Tool | Replaces / use | Tool | Replaces / use |
+|------|----------------|------|----------------|
+| `rg` (ripgrep) | fast recursive grep | `procs` | `ps`, readable |
+| `fd` | friendly `find` | `btop` | `top`/`htop` monitor |
+| `jq` | JSON processor | `xh` | HTTP client (curl/httpie) |
+| `yq` | YAML/TOML processor | `gping` | `ping` with a live graph |
+| `delta` | syntax-highlighted git diffs | `dust` | `du` as a tree |
+| `sd` | simpler `sed` find/replace | `duf` | `df`, prettier |
+| `tldr` | community example man pages | | |
+
+`dot_zshrc` adds **safe interactive aliases** only where the replacement is a
+drop-in: `du`→`dust`, `df`→`duf`, `ps`→`procs`, `ping`→`gping`,
+`top`/`htop`→`btop`. `rg`/`fd`/`sd`/`jq`/`yq`/`xh`/`delta` are intentionally
+**not** aliased over `grep`/`find`/`sed` (their flags differ and aliasing would
+break scripts and muscle memory) — use them by name. When `fd` is present it
+also backs fzf's file/dir walks via `FZF_DEFAULT_COMMAND`.
+
+Binaries are pulled from each project's GitHub releases (x86_64 and arm64;
+unsupported architectures are skipped). For `procs` (published only as a `.zip`)
+the script uses `unzip` when present and otherwise a tiny built-in Node
+extractor, so it still installs on minimal images without `unzip`. Skip this
+whole layer with:
+
+```sh
+INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e
+```
 
 ## Fonts
 

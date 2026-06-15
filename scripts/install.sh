@@ -13,6 +13,8 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/install/zsh.sh"
 # shellcheck source=install/rust-tools.sh
 . "$SCRIPT_DIR/install/rust-tools.sh"
+# shellcheck source=install/modern-cli.sh
+. "$SCRIPT_DIR/install/modern-cli.sh"
 # shellcheck source=install/fastfetch.sh
 . "$SCRIPT_DIR/install/fastfetch.sh"
 # shellcheck source=install/fonts.sh
@@ -32,6 +34,7 @@ main() {
   install_tpm
   install_rust
   install_cargo_tools
+  install_modern_cli
   install_fastfetch
   install_uv
   install_claude
