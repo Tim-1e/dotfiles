@@ -2148,11 +2148,11 @@ function Get-AiHealthyProfileName {
     # every entry reads skip (not "down"), so the default is chosen without
     # probing. Run `cc health` first to populate health for auto-failover.
     $h = Get-AiProfileHealthCached -Tool $Tool -Profile $p -CacheOnly
-    $mode = Get-AiProfileMode -Profile $p
-    # Subscription profiles need no probe -> usable. For api profiles, require a
-    # cached POSITIVE signal (healthy/degraded); an unprobed api profile reads
-    # "skip" and is NOT auto-selected. Run `cc health` first to populate health.
-    if ($mode -eq "sub" -or $h.Status -eq "healthy" -or $h.Status -eq "degraded") {
+    # Only auto-select a profile with a cached POSITIVE signal (healthy/
+    # degraded). Unprobed api profiles and subscription profiles both read
+    # "skip" and are NOT auto-selected (we can't confirm they're up). Run
+    # `cc health` first to populate health for real auto-failover.
+    if ($h.Status -eq "healthy" -or $h.Status -eq "degraded") {
       return (Get-AiProfileName -Profile $p)
     }
   }
@@ -2316,107 +2316,136 @@ function Show-AiHealth {
   )
   Sync-AiHealthCache -Tool $Tool
   $label = if ($Tool -eq "codex") { "Codex" } else { "Claude Code" }
-  Write-Host "$label profile health ($script:AiRegistryPath):"
   $saved = Get-AiSavedProfileName -Tool $Tool
-
-  # Phase 1 (instant): build a plan per profile. Cache hits (and Early/short-
-  # circuit plans) are resolved immediately; only stale/missing profiles queue
-  # real requests. Gathering every request up front lets Phase 2 fire them all
-  # at once instead of probing serially (which made `cc health` wait on each
-  # slow relay one after another).
   $profiles = @(Get-AiToolProfiles -Tool $Tool)
+
+  # Phase 1 (instant): build a plan per profile. Cached/Early results resolve
+  # immediately; stale/missing profiles queue real requests. $display holds the
+  # current cell/method/note for each profile so the table can be redrawn as
+  # probes land (pending rows show ⏳…).
   $tasks = [System.Collections.Generic.List[object]]::new()
-  $final = @{}            # name -> health result
-  $plans = @{}            # name -> plan (for verdict)
+  $display = @{}            # name -> @{ Health; Method; Note; Pending }
+  $plans = @{}              # name -> plan (for verdict)
+  $expected = @{}           # name -> #candidates (1 claude / 2 codex)
+  $cellOf = {
+    param($h)
+    if ($h) { Format-AiHealthCell $h } else { "?" }
+  }
   foreach ($p in $profiles) {
     $n = Get-AiProfileName -Profile $p
     $plan = Get-AiProfileProbePlan -Tool $Tool -Profile $p
     if ($plan.ContainsKey("Early")) {
-      $final[$n] = $plan.Early
+      $e = $plan.Early
+      $display[$n] = @{ Health = (& $cellOf $e); Method = ($(if ($e.Method) { $e.Method } else { "-" })); Note = ($(if ($e.Error) { $e.Error } else { "" })); Pending = $false }
       continue
     }
     $plans[$n] = $plan
+    $useCache = $false
     if (-not $Fresh) {
       $cached = Get-AiProfileHealthCached -Tool $Tool -Profile $p -CacheOnly
-      if ($cached.Cached) { $final[$n] = $cached; continue }
-    }
-    foreach ($c in $plan.Candidates) {
-      $tasks.Add([pscustomobject]@{
-        Name = $n; Label = $c.Label; Url = $c.Url; Headers = $plan.Headers; Body = $c.Body; Check = $c.Check
-      })
-    }
-  }
-
-  # Phase 2 (concurrent): fire every queued request in parallel. The script
-  # block uses ONLY builtin cmdlets/types (Invoke-RestMethod, Stopwatch) so it
-  # does not need the engine's functions in each child runscape. Invoke-
-  # RestMethod, not Invoke-WebRequest, avoids the PS7 stall seen on some relays.
-  # IMPORTANT: the body is validated INSIDE the block. Objects crossing a
-  # ForEach-Object -Parallel runsape boundary get XML-serialized, so a returned
-  # parsed body's arrays no longer satisfy `-is [array]` in the parent — which
-  # produced false "200 but no generated content". Validating before return and
-  # sending back only primitives (Ok/Code/LatencyMs/Detail) sidesteps that.
-  if ($tasks.Count -gt 0) {
-    $to = $TimeoutSec
-    $fired = $tasks | Microsoft.PowerShell.Core\ForEach-Object -Parallel {
-      $t = $_; $timeout = $using:to
-      $sw = [System.Diagnostics.Stopwatch]::StartNew()
-      $r = [pscustomobject]@{ Name = $t.Name; Label = $t.Label; Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
-      try {
-        $j = Invoke-RestMethod -Uri $t.Url -Method Post -Headers $t.Headers -Body $t.Body `
-          -ContentType "application/json" -TimeoutSec $timeout -ErrorAction Stop
-        $sw.Stop()
-        $r.Code = 200; $r.LatencyMs = [int]$sw.ElapsedMilliseconds
-        $valid = $false
-        switch ($t.Check) {
-          "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
-          "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
-          "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
-        }
-        $r.Ok = $valid
-        if (-not $valid) { $r.Detail = "200 but no generated content" }
-      } catch {
-        $sw.Stop()
-        $r.LatencyMs = [int]$sw.ElapsedMilliseconds
-        if ($_.Exception.Response) { $r.Code = [int]$_.Exception.Response.StatusCode; $r.Detail = "HTTP " + $r.Code }
-        else { $r.Detail = $_.Exception.Message }
+      if ($cached.Cached) {
+        $display[$n] = @{ Health = (& $cellOf $cached); Method = ($(if ($cached.Method) { $cached.Method } else { "-" })); Note = ($(if ($cached.Error) { $cached.Error } else { "" })); Pending = $false }
+        $useCache = $true
       }
-      $r
-    } -ThrottleLimit ([Math]::Max(8, $tasks.Count))
-
-    # Phase 3 (instant): group per profile, resolve verdict, cache. Sequential
-    # + cheap (no network, no cache-write race). Ok is already set per request.
-    $byProfile = @{}
-    foreach ($r in $fired) {
-      if (-not $byProfile.ContainsKey($r.Name)) { $byProfile[$r.Name] = @{} }
-      $byProfile[$r.Name][$r.Label] = $r
     }
-    foreach ($n in $plans.Keys) {
-      if ($final.ContainsKey($n)) { continue }
-      $results = $byProfile[$n]
-      if (-not $results) { continue }
-      $h = Resolve-AiProfileHealth -Plan $plans[$n] -Results $results -DegradedMs $DegradedMs
-      $final[$n] = $h
-      $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-      Write-AiHealthCacheEntry -Key "$Tool.$n" -Entry ([pscustomobject]@{
-          status = $h.Status; latencyMs = $h.LatencyMs; method = $h.Method; error = $h.Error; probedAt = $now
+    if (-not $useCache) {
+      $display[$n] = @{ Health = "⏳…"; Method = "-"; Note = "probing…"; Pending = $true }
+      foreach ($c in $plan.Candidates) {
+        $tasks.Add([pscustomobject]@{
+          Name = $n; Label = $c.Label; Url = $c.Url; Headers = $plan.Headers; Body = $c.Body; Check = $c.Check; Timeout = $TimeoutSec
         })
+      }
+      $expected[$n] = @($plan.Candidates).Count
     }
   }
 
-  $rows = foreach ($p in $profiles) {
-    $n = Get-AiProfileName -Profile $p
-    $h = $final[$n]
-    [pscustomobject]@{
-      Sel    = if ($n -eq $saved) { "*" } else { " " }
-      Name   = $n
-      Health = Format-AiHealthCell $h
-      Method = if ($h.Method) { $h.Method } else { "-" }
-      Note   = if ($h.Error) { $h.Error } else { "" }
+  # Build the table rows from the live $display state (final summary).
+  $renderRows = {
+    foreach ($p in $profiles) {
+      $n = Get-AiProfileName -Profile $p
+      $d = $display[$n]
+      if (-not $d) { $d = @{ Health = "?"; Method = "-"; Note = ""; Pending = $false } }
+      [pscustomobject]@{
+        Sel    = if ($n -eq $saved) { "*" } else { " " }
+        Name   = $n
+        Health = $d.Health
+        Method = $d.Method
+        Note   = $d.Note
+      }
     }
   }
-  $rows | Format-Table -AutoSize
-  Write-Host ("  (health " + ($(if ($Fresh) { "re-probed (fresh, parallel)" } else { "cached <=5min" })) + "; '" + $Tool + " health --fresh' re-probe, '" + $Tool + " health-clear' clears)") -ForegroundColor DarkGray
+
+  # Probe block: builtins only (no engine functions in the child runsape). Body
+  # is validated INSIDE the block — objects crossing the runsape boundary get
+  # XML-serialized, so `-is [array]` would fail in the parent; returning only
+  # primitives sidesteps that.
+  $probeBlock = {
+    $t = $_; $timeout = $t.Timeout
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $r = [pscustomobject]@{ Name = $t.Name; Label = $t.Label; Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
+    try {
+      $j = Invoke-RestMethod -Uri $t.Url -Method Post -Headers $t.Headers -Body $t.Body `
+        -ContentType "application/json" -TimeoutSec $timeout -ErrorAction Stop
+      $sw.Stop()
+      $r.Code = 200; $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+      $valid = $false
+      switch ($t.Check) {
+        "messages"  { $valid = (($j.content -is [array]) -and ($j.content.Count -gt 0)) -or ($j.type -eq "message") }
+        "responses" { $valid = (($j.output -is [array] -and $j.output.Count -gt 0) -or $j.output_text -or $j.status -eq "completed") }
+        "chat"      { $valid = (($j.choices -is [array]) -and ($j.choices.Count -gt 0)) }
+      }
+      $r.Ok = $valid
+      if (-not $valid) { $r.Detail = "200 but no generated content" }
+    } catch {
+      $sw.Stop()
+      $r.LatencyMs = [int]$sw.ElapsedMilliseconds
+      if ($_.Exception.Response) { $r.Code = [int]$_.Exception.Response.StatusCode; $r.Detail = "HTTP " + $r.Code }
+      else { $r.Detail = $_.Exception.Message }
+    }
+    $r
+  }
+
+  # Cache + display update for a profile once ALL its candidates are in.
+  $finalize = {
+    param($n)
+    $h = Resolve-AiProfileHealth -Plan $plans[$n] -Results $reqs[$n] -DegradedMs $DegradedMs
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Write-AiHealthCacheEntry -Key "$Tool.$n" -Entry ([pscustomobject]@{
+        status = $h.Status; latencyMs = $h.LatencyMs; method = $h.Method; error = $h.Error; probedAt = $now
+      })
+    $display[$n] = @{ Health = (Format-AiHealthCell $h); Method = ($(if ($h.Method) { $h.Method } else { "-" })); Note = ($(if ($h.Error) { $h.Error } else { "" })); Pending = $false }
+  }
+
+  $footer = "  (health " + ($(if ($Fresh) { "re-probed (fresh, parallel)" } else { "cached <=5min" })) + "; '" + $Tool + " health --fresh' re-probe, '" + $Tool + " health-clear' clears)"
+
+  Write-Host "$label profile health ($script:AiRegistryPath):"
+
+  # Probe concurrently and STREAM each result as it lands — one Write-Host line
+  # per completed profile (fastest first). This is the watchdog/live feel the
+  # user asked for, and it is terminal-safe: no ANSI cursor save/restore and no
+  # in-place redraw (those can deadlock an interactive host with ForEach-Object
+  # -Parallel, or mis-render under conhost). A final aligned table follows.
+  if ($tasks.Count -gt 0) {
+    $probeProfileCount = 0
+    foreach ($n in $expected.Keys) { $probeProfileCount += 1 }
+    Write-Host ("  probing {0} profile(s) in parallel (results stream as they resolve)…" -f $probeProfileCount) -ForegroundColor DarkGray
+    $reqs = @{}; $doneCount = @{}
+    $tasks | Microsoft.PowerShell.Core\ForEach-Object -Parallel $probeBlock -ThrottleLimit ([Math]::Max(8, $tasks.Count)) | ForEach-Object {
+      if (-not $reqs.ContainsKey($_.Name)) { $reqs[$_.Name] = @{}; $doneCount[$_.Name] = 0 }
+      $reqs[$_.Name][$_.Label] = $_
+      $doneCount[$_.Name] += 1
+      if ($doneCount[$_.Name] -ge $expected[$_.Name]) {
+        & $finalize $_.Name
+        $d = $display[$_.Name]
+        Write-Host ("    {0} {1,-14} {2}" -f $d.Health, $_.Name, $d.Note) -ForegroundColor DarkGray
+      }
+    }
+  }
+
+  # Final registry-ordered summary (cached profiles land here too).
+  Write-Host ""
+  (& $renderRows) | Format-Table -AutoSize
+  Write-Host $footer -ForegroundColor DarkGray
 }
 
 function Show-CodexStatus {

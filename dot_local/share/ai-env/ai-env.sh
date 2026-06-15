@@ -1564,17 +1564,15 @@ const d=all.find(x=>String(x.name)===def);const rest=all.filter(x=>String(x.name
 const out=d?[d,...rest]:rest;
 for(const x of out)console.log(JSON.stringify(x));
 ' "$AI_REGISTRY_PATH" "$tool" "$default")" || return 1
-  local mode
   while IFS= read -r pj; do
     [ -n "$pj" ] || continue
-    mode="$(_ai_profile_value "$pj" mode api)"
     h="$(_ai_health_cached "$tool" "$pj" 0 1)"
     st="$(_ai_health_field "$h" status)"
-    # Subscription profiles need no probe -> usable. For api profiles, require a
-    # cached POSITIVE signal (healthy/degraded); an unprobed api profile reads
-    # "skip" and is NOT auto-selected (we don't know it's up) -> keep looking.
+    # Only auto-select a profile with a cached POSITIVE signal (healthy/
+    # degraded) — an unprobed api profile (skip) or a subscription profile
+    # (unprobeable, also skip) is NOT chosen, since we can't confirm it's up.
     # Run `cc health` first to populate health for real auto-failover.
-    if [ "$mode" = "sub" ] || [ "$st" = "healthy" ] || [ "$st" = "degraded" ]; then
+    if [ "$st" = "healthy" ] || [ "$st" = "degraded" ]; then
       _ai_profile_value "$pj" name ""; return
     fi
   done <<<"$ordered"
@@ -1645,50 +1643,90 @@ let r={};try{r=JSON.parse(fs.readFileSync(p,"utf8"));}catch{}
 for(const x of r[tool]||[])console.log(JSON.stringify(x));
 ' "$AI_REGISTRY_PATH" "$tool")" || return 1
 
-  # Gather profiles + names + a need-probe flag (cache-only check, instant).
-  local -a _pjs=() _nms=() _need=()
-  local pj nm cached st
+  # Per-profile display state (indexed arrays; bash 3.2 has no associative
+  # arrays). pending=1 -> still probing (shown as ⏳…); need=1 -> has a job.
+  local -a _pjs=() _nms=() _cell=() _method=() _note=() _pending=() _need=()
+  local idx=0 pj nm cached st cell method note
   while IFS= read -r pj; do
     [ -n "$pj" ] || continue
-    _pjs+=("$pj")
+    _pjs[$idx]="$pj"
     nm="$(_ai_profile_value "$pj" name "")"
-    _nms+=("$nm")
-    if [ "$fresh" = "1" ]; then
-      _need+=(1)
-    else
+    _nms[$idx]="$nm"
+    cell="⏳…"; method="-"; note="probing…"; _pending[$idx]=1; _need[$idx]=1
+    if [ "$fresh" != "1" ]; then
       cached="$(_ai_health_cached "$tool" "$pj" 0 1)"
       st="$(_ai_health_field "$cached" status)"
-      [ "$st" = "skip" ] && _need+=(1) || _need+=(0)
+      if [ "$st" != "skip" ]; then
+        cell="$(_ai_health_cell "$cached")"
+        method="$(_ai_health_field "$cached" method)"; [ -n "$method" ] || method="-"
+        note="$(_ai_health_field "$cached" error)"; [ -n "$note" ] || note=""
+        _pending[$idx]=0; _need[$idx]=0
+      fi
     fi
+    _cell[$idx]="$cell"; _method[$idx]="$method"; _note[$idx]="$note"
+    idx=$((idx+1))
   done <<<"$profiles"
+  local count=$idx
 
-  # Fire every stale probe concurrently (background node jobs), then wait. Total
-  # time is the slowest single relay, not the sum — `cc health` no longer waits
-  # on each slow relay one after another.
-  local tmpdir i
-  tmpdir="$(mktemp -d)"
-  for i in "${!_pjs[@]}"; do
-    [ "${_need[$i]}" = "1" ] || continue
-    ( _ai_probe_health "$tool" "${_pjs[$i]}" >"$tmpdir/$i.probe" 2>/dev/null ) &
-  done
-  wait
+  # Render header + rows from the live arrays (bash dynamic scoping lets a
+  # nested function read the caller's locals).
+  _render() {
+    local i sel
+    printf '%-3s %-14s %-10s %-12s %s\n' "Sel" "Name" "Health" "Method" "Note"
+    printf '%-3s %-14s %-10s %-12s %s\n' "---" "----" "------" "------" "----"
+    i=0
+    while [ "$i" -lt "$count" ]; do
+      [ "${_nms[$i]}" = "$saved" ] && sel="*" || sel=" "
+      printf '%-3s %-14s %-10s %-12s %s\n' "$sel" "${_nms[$i]}" "${_cell[$i]}" "${_method[$i]}" "${_note[$i]}"
+      i=$((i+1))
+    done
+  }
+  # Read a finished probe's result file, stamp probedAt, cache, update display.
+  _apply_result() {
+    local i="$1" result
+    result="$(cat "$tmpdir/$i.probe" 2>/dev/null)"
+    result="$(node -e 'try{const r=JSON.parse(process.argv[1]);r.probedAt=Math.floor(Date.now()/1000);process.stdout.write(JSON.stringify(r));}catch(e){process.stdout.write("{\"status\":\"down\",\"latencyMs\":0,\"method\":null,\"error\":\"probe failed\"}");}' "$result")"
+    _ai_health_store "$tool" "${_nms[$i]}" "$result" 2>/dev/null || true
+    _cell[$i]="$(_ai_health_cell "$result")"
+    _method[$i]="$(_ai_health_field "$result" method)"; [ -n "${_method[$i]}" ] || _method[$i]="-"
+    _note[$i]="$(_ai_health_field "$result" error)"
+  }
 
-  local result cell method err sel
-  for i in "${!_pjs[@]}"; do
-    if [ "${_need[$i]}" = "1" ]; then
-      result="$(cat "$tmpdir/$i.probe" 2>/dev/null)"
-      result="$(node -e 'try{const r=JSON.parse(process.argv[1]);r.probedAt=Math.floor(Date.now()/1000);process.stdout.write(JSON.stringify(r));}catch(e){process.stdout.write("{\"status\":\"down\",\"latencyMs\":0,\"method\":null,\"error\":\"probe failed\"}");}' "$result")"
-      _ai_health_store "$tool" "${_nms[$i]}" "$result" 2>/dev/null || true
-    else
-      result="$(_ai_health_read_entry "$tool" "${_nms[$i]}")"
-    fi
-    cell="$(_ai_health_cell "$result")"
-    method="$(_ai_health_field "$result" method)"; [ -n "$method" ] || method="-"
-    err="$(_ai_health_field "$result" error)"
-    [ "${_nms[$i]}" = "$saved" ] && sel="*" || sel=" "
-    printf '%s %-14s %-10s %-12s %s\n' "$sel" "${_nms[$i]}" "$cell" "$method" "$err"
+  local pending_count=0 i=0
+  while [ "$i" -lt "$count" ]; do [ "${_pending[$i]}" = "1" ] && pending_count=$((pending_count+1)); i=$((i+1)); done
+
+  # Fire every stale probe concurrently (background node jobs). Total time is
+  # the slowest single relay, not the sum.
+  local tmpdir; tmpdir="$(mktemp -d)"
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    [ "${_pending[$i]}" = "1" ] && ( _ai_probe_health "$tool" "${_pjs[$i]}" >"$tmpdir/$i.probe" 2>/dev/null ) &
+    i=$((i+1))
   done
+
+  # Stream each result as its background probe finishes (poll), then a final
+  # registry-ordered table. One line per completion — terminal-safe, no ANSI
+  # in-place redraw (which can deadlock/glitch an interactive terminal).
+  if [ "$pending_count" -gt 0 ]; then
+    printf '  probing %s profile(s) in parallel (results stream as they resolve)…\n' "$pending_count"
+    local remaining=$pending_count
+    while [ "$remaining" -gt 0 ]; do
+      sleep 0.2
+      i=0
+      while [ "$i" -lt "$count" ]; do
+        if [ "${_pending[$i]}" = "1" ] && [ -s "$tmpdir/$i.probe" ]; then
+          _apply_result "$i"
+          _pending[$i]=0
+          remaining=$((remaining-1))
+          printf '    %s %-14s %s\n' "${_cell[$i]}" "${_nms[$i]}" "${_note[$i]}"
+        fi
+        i=$((i+1))
+      done
+    done
+  fi
+  wait 2>/dev/null
   rm -rf "$tmpdir"
+  _render
   echo "  (health $( [ "$fresh" = 1 ] && echo 're-probed (fresh, parallel)' || echo 'cached <=5min'); ${tool} health --fresh re-probe, ${tool} health-clear clears)"
 }
 
