@@ -235,10 +235,14 @@ not just that the endpoint is reachable. Results are classified as 🟢 healthy,
 - Running `cc` / `cx` with no argument **auto-selects** the first non-down
   profile (default first), so a dead router is skipped automatically. `cc next`
   keeps the old cycle-to-next behavior.
-- Relays serve different model sets, so the probe model is per-profile:
-  `cc probe-model NAME MODEL` (default Claude `claude-3-5-haiku`, Codex
-  `gpt-5.4-mini`); `cc default NAME` sets the primary; `cc health-clear` clears
-  the cache. The probe uses Node's built-in HTTPS (no `curl` dependency).
+- Relays serve different model sets, so the probe model can be per-profile:
+  `cc probe-model NAME MODEL`. Without `probe_model`, Claude probes use
+  `ANTHROPIC_MODEL`, then `ANTHROPIC_DEFAULT_HAIKU_MODEL`, then a cheap Haiku
+  fallback; Codex probes use the runtime TOML `model`, then the global
+  `~/.codex/config.toml` model, then a cheap GPT fallback. If a relay reports
+  that the probe model is unsupported, set `probe_model` for that profile.
+  `cc default NAME` sets the primary; `cc health-clear` clears the cache. The
+  probe uses Node's built-in HTTPS (no `curl` dependency).
 
 ### MCP servers
 

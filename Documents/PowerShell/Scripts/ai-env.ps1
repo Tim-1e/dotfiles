@@ -898,6 +898,25 @@ function Get-AiProfileEnvSummary {
   return [string]@($envObj.PSObject.Properties).Count
 }
 
+function Get-AiProfileEnvValue {
+  param(
+    [Parameter(Mandatory = $true)]$Profile,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+
+  $envObj = Get-AiProperty -Object $Profile -Name "env"
+  if (-not $envObj) {
+    return $null
+  }
+
+  $prop = $envObj.PSObject.Properties[$Name]
+  if ($prop -and $prop.Value) {
+    return [string]$prop.Value
+  }
+
+  return $null
+}
+
 function Split-AiEnvArguments {
   param([string[]]$Arguments)
 
@@ -1122,6 +1141,88 @@ function Join-Path-Uri {
   return "$o/$r"
 }
 
+function Get-AiProbeModel {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
+    [Parameter(Mandatory = $true)]$Profile
+  )
+
+  $explicit = Get-AiProperty -Object $Profile -Name "probe_model"
+  if ($explicit) {
+    return [string]$explicit
+  }
+
+  if ($Tool -eq "claude") {
+    $secretId = Get-AiSecretId -Tool $Tool -Profile $Profile
+    $section = Get-AiTomlSecretSection -SecretId $secretId
+    if ($section.ContainsKey("ANTHROPIC_MODEL") -and $section["ANTHROPIC_MODEL"]) {
+      return [string]$section["ANTHROPIC_MODEL"]
+    }
+
+    $legacyPath = Get-AiSecretPath -Profile $Profile
+    if ($legacyPath -and (Test-Path -LiteralPath $legacyPath)) {
+      $legacyModel = Get-PowerShellEnvAssignment -Path $legacyPath -Name "ANTHROPIC_MODEL"
+      if ($legacyModel) {
+        return $legacyModel
+      }
+    }
+
+    $profileModel = Get-AiProfileEnvValue -Profile $Profile -Name "ANTHROPIC_MODEL"
+    if ($profileModel) {
+      return $profileModel
+    }
+
+    $processModel = [Environment]::GetEnvironmentVariable("ANTHROPIC_MODEL")
+    if ($processModel) {
+      return $processModel
+    }
+
+    $userModel = [Environment]::GetEnvironmentVariable("ANTHROPIC_MODEL", "User")
+    if ($userModel) {
+      return $userModel
+    }
+
+    if ($section.ContainsKey("ANTHROPIC_DEFAULT_HAIKU_MODEL") -and $section["ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
+      return [string]$section["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+    }
+
+    if ($legacyPath -and (Test-Path -LiteralPath $legacyPath)) {
+      $legacyHaikuModel = Get-PowerShellEnvAssignment -Path $legacyPath -Name "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+      if ($legacyHaikuModel) {
+        return $legacyHaikuModel
+      }
+    }
+
+    $profileHaikuModel = Get-AiProfileEnvValue -Profile $Profile -Name "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+    if ($profileHaikuModel) {
+      return $profileHaikuModel
+    }
+
+    $processHaikuModel = [Environment]::GetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+    if ($processHaikuModel) {
+      return $processHaikuModel
+    }
+
+    $userHaikuModel = [Environment]::GetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", "User")
+    if ($userHaikuModel) {
+      return $userHaikuModel
+    }
+
+    return "claude-3-5-haiku-20241022"
+  }
+
+  $profilePath = Get-CodexProfilePath -Profile $Profile
+  $model = Get-TomlStringValue -Path $profilePath -Key "model"
+  if (-not $model) {
+    $model = Get-TomlStringValue -Path (Join-Path (Get-CodexHome -Profile $Profile) "config.toml") -Key "model"
+  }
+  if ($model) {
+    return $model
+  }
+
+  return "gpt-5.4-mini"
+}
+
 # Returns probe target (base origin + auth headers) for a profile WITHOUT
 # mutating $env:. Used by Get-AiProfileHealth so a `cc list` check never
 # disturbs the current shell session.
@@ -1186,7 +1287,7 @@ function Get-AiProfileProbeTarget {
     $result.Headers = $headers
     $result.SecretOk = [bool]($authToken -or $apiKey)
     $result.SecretLabel = if ($result.SecretOk) { "$script:AiSecretsPath#$secretId" } else { "<none>" }
-    $result.ProbeModel = [string](Get-AiProperty -Object $Profile -Name "probe_model" -Default "claude-3-5-haiku-20241022")
+    $result.ProbeModel = Get-AiProbeModel -Tool $Tool -Profile $Profile
     return $result
   }
 
@@ -1210,10 +1311,7 @@ function Get-AiProfileProbeTarget {
   $result.SecretOk = [bool]$apiKey
   $result.SecretLabel = if ($apiKey) { "$script:AiSecretsPath#$secretId" } else { "<none>" }
 
-  # Probe with a cheap model by default (low cost + low latency). A profile may
-  # override via `probe_model` — required for provider-specific namespaces that
-  # do not serve GPT models (e.g. GLM -> set probe_model = "glm-4.5-flash").
-  $result.ProbeModel = [string](Get-AiProperty -Object $Profile -Name "probe_model" -Default "gpt-5.4-mini")
+  $result.ProbeModel = Get-AiProbeModel -Tool $Tool -Profile $Profile
   return $result
 }
 
@@ -1307,7 +1405,14 @@ function Invoke-AiProbeRequest {
     $r.LatencyMs = [int]$sw.ElapsedMilliseconds
     if ($_.Exception.Response) {
       $r.Code = [int]$_.Exception.Response.StatusCode
-      $r.Detail = "HTTP $($r.Code)"
+      $bodyText = [string]$_.ErrorDetails.Message
+      if ($bodyText) {
+        $bodyText = ($bodyText -replace "\s+", " ").Trim()
+        if ($bodyText.Length -gt 240) { $bodyText = $bodyText.Substring(0, 240) }
+        $r.Detail = "HTTP $($r.Code) $bodyText"
+      } else {
+        $r.Detail = "HTTP $($r.Code)"
+      }
     } else {
       $r.Detail = $_.Exception.Message
     }
@@ -1340,6 +1445,7 @@ function Test-AiProbeBody {
 function ConvertTo-AiProbeError {
   param([string]$Detail)
   if (-not $Detail) { return "" }
+  if (Test-AiProbeModelUnsupported $Detail) { return "probe model unsupported; set probe_model" }
   if ($Detail -match "^(HTTP \d|200 but)") { return $Detail }
   $l = $Detail.ToLower()
   if ($l -match "timeout|canceled|timed out|httpclient\.timeout") { return "timeout" }
@@ -1348,6 +1454,13 @@ function ConvertTo-AiProbeError {
   if ($l -match "enotfound|getaddrinfo|nodata|getaddr|dns") { return "DNS failed" }
   if ($l -match "econnreset|socket hang up|reset by peer|reset") { return "connection reset" }
   return $Detail
+}
+
+function Test-AiProbeModelUnsupported {
+  param([string]$Detail)
+  if (-not $Detail) { return $false }
+  $l = $Detail.ToLowerInvariant()
+  return ($l -match "no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported")
 }
 
 function Resolve-AiProfileHealth {
@@ -1360,6 +1473,9 @@ function Resolve-AiProfileHealth {
       return [pscustomobject]@{ Status = $st; LatencyMs = $m.LatencyMs; Method = "generation"; Error = $null }
     }
     $md = ConvertTo-AiProbeError $m.Detail
+    if (Test-AiProbeModelUnsupported $m.Detail) {
+      return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $md) }
+    }
     if ($m.Code -eq 429 -or ($m.Code -ge 500 -and $m.Code -lt 600)) {
       return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $md + " (transient)") }
     }
@@ -1378,6 +1494,10 @@ function Resolve-AiProfileHealth {
   $note = "POST /$($Plan.EffLabel) -> $effD"
   if ($alt.Ok) {
     $note += "; but /$($Plan.AltLabel) works -> set wire_api = `"$($Plan.AltLabel)`" in config.toml"
+    return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
+  }
+  if ((Test-AiProbeModelUnsupported $eff.Detail) -or (Test-AiProbeModelUnsupported $alt.Detail)) {
+    $note += "; /$($Plan.AltLabel) -> $altD"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
   }
   if ($eff.Code -eq 429 -or ($eff.Code -ge 500 -and $eff.Code -lt 600)) {
@@ -1982,7 +2102,7 @@ Usage:
                      Prompts for missing base-url/env-key and the secret in a terminal.
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
-  cx probe-model NAME [MODEL]  Set/clear health-probe model (default gpt-5.4-mini)
+  cx probe-model NAME [MODEL]  Set/clear health-probe model override
   cx default [NAME]   Show/set the default (primary) profile
   cx edit            Open the profile registry (profiles.json) in $EDITOR
   cx health           Probe & report profile health (🟢🟡🔴, parallel); --fresh re-probes
@@ -2027,7 +2147,7 @@ Usage:
                      Prompts for missing base-url and the secret in a terminal.
   cc add-sub NAME    Register a Claude Code subscription label
   cc remove NAME     Remove a Claude Code profile registration
-  cc probe-model NAME [MODEL]  Set/clear health-probe model (default claude-3-5-haiku)
+  cc probe-model NAME [MODEL]  Set/clear health-probe model override
   cc default [NAME]   Show/set the default (primary) profile
   cc edit            Open the profile registry (profiles.json) in $EDITOR
   cc health           Probe & report profile health (🟢🟡🔴, parallel); --fresh re-probes
@@ -2099,9 +2219,8 @@ function Get-AiHealthCellCached {
 }
 
 # Set or clear a profile's probe_model (the model used by Get-AiProfileHealth).
-# Different relays serve different model sets — e.g. some only serve the latest
-# 4.6 models and return "No available providers" for haiku, causing false 503s.
-# Default probe models: claude=claude-3-5-haiku-20241022, codex=gpt-5.4-mini.
+# Use this for routers that do not serve the runtime/default model or report
+# "No available providers" for the automatic probe model.
 function Set-AiProfileProbeModel {
   param(
     [Parameter(Mandatory = $true)][ValidateSet("codex", "claude")][string]$Tool,
@@ -2110,7 +2229,7 @@ function Set-AiProfileProbeModel {
 
   $parsed = ConvertFrom-AiManagementArgs -Arguments $Arguments
   if ($parsed.Positionals.Count -lt 1) {
-    throw "Usage: probe-model <name> [model]  (omit model to clear -> default)"
+    throw "Usage: probe-model <name> [model]  (omit model to clear -> automatic probe model)"
   }
   $query = ([string]$parsed.Positionals[0]).ToLowerInvariant()
   $model = if ($parsed.Positionals.Count -ge 2) { [string]$parsed.Positionals[1] } else { "" }
@@ -2135,9 +2254,9 @@ function Set-AiProfileProbeModel {
     } else {
       if ($profile.PSObject.Properties.Name -contains 'probe_model') {
         $profile.PSObject.Properties.Remove('probe_model')
-        Write-Host "Cleared $Tool '$pname' probe_model (back to default)"
+        Write-Host "Cleared $Tool '$pname' probe_model (using automatic probe model)"
       } else {
-        Write-Host "$Tool '$pname' has no probe_model set (already default)"
+        Write-Host "$Tool '$pname' has no probe_model set (already automatic)"
       }
     }
     break
@@ -2452,7 +2571,6 @@ function Show-AiHealth {
     $esc = [char]27
     $probeScriptStr = @'
 param($Candidates, $Headers, $TimeoutSec)
-$out = New-Object System.Collections.ArrayList
 foreach ($c in $Candidates) {
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $r = [pscustomobject]@{ Label = $c.Label; Ok = $false; Code = 0; LatencyMs = 0; Detail = $null }
@@ -2468,11 +2586,20 @@ foreach ($c in $Candidates) {
     $r.Ok = $valid; if (-not $valid) { $r.Detail = "200 but no generated content" }
   } catch {
     $sw.Stop(); $r.LatencyMs = [int]$sw.ElapsedMilliseconds
-    if ($_.Exception.Response) { $r.Code = [int]$_.Exception.Response.StatusCode; $r.Detail = "HTTP " + $r.Code } else { $r.Detail = $_.Exception.Message }
+    if ($_.Exception.Response) {
+      $r.Code = [int]$_.Exception.Response.StatusCode
+      $bodyText = [string]$_.ErrorDetails.Message
+      if ($bodyText) {
+        $bodyText = ($bodyText -replace "\s+", " ").Trim()
+        if ($bodyText.Length -gt 240) { $bodyText = $bodyText.Substring(0, 240) }
+        $r.Detail = "HTTP " + $r.Code + " " + $bodyText
+      } else {
+        $r.Detail = "HTTP " + $r.Code
+      }
+    } else { $r.Detail = $_.Exception.Message }
   }
-  [void]$out.Add($r)
+  $r
 }
-, $out
 '@
     $runspaces = @{}
     try {

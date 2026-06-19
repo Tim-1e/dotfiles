@@ -1188,6 +1188,10 @@ Usage:
                      Prompts for missing base-url/env-key and the secret in a terminal.
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
+  cx probe-model NAME [MODEL]  Set/clear health-probe model override
+  cx default [NAME]  Show/set the default (primary) profile
+  cx health          Probe & report profile health; --fresh re-probes
+  cx health-clear    Clear the health probe cache
   cx help            Show this help
 
 Config:
@@ -1300,6 +1304,10 @@ Usage:
                      --env adds non-secret per-profile vars (model mapping, compact window).
   cc add-sub NAME    Register a Claude Code subscription label
   cc remove NAME     Remove a Claude Code profile registration
+  cc probe-model NAME [MODEL]  Set/clear health-probe model override
+  cc default [NAME]  Show/set the default (primary) profile
+  cc health          Probe & report profile health; --fresh re-probes
+  cc health-clear    Clear the health probe cache
   cc help            Show this help
 
 Config:
@@ -1466,22 +1474,22 @@ const mode=P.mode||"sub";
 if(mode!=="api"){out({status:"skip",latencyMs:0,method:null,error:"subscription mode (no remote probe)"});process.exit(0);}
 const parseSecrets=(file)=>{const s={};if(!fs.existsSync(file))return s;let c="";for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const t=line.trim();if(!t||t.startsWith("#"))continue;const sec=t.match(/^\[([^\]]+)\]\s*$/);if(sec){c=sec[1].trim();s[c]=s[c]||{};continue;}if(!c)continue;const m=t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(!m)continue;let v=m[2].trim();if(v.startsWith("\"")){const mm=v.match(/^"((?:\\.|[^"])*)"/);if(mm){try{v=JSON.parse(mm[0]);}catch{v=mm[1];}}}else if(v.startsWith("'\''")){const mm=v.match(/^'\''([^'\'']*)'\''/);if(mm)v=mm[1];}else v=v.replace(/\s+#.*$/,"").trim();s[c][m[1]]=v;}return s;};
 const expand=(x)=>!x?"":x.replace(/^~(?=\/|$)/,process.env.HOME||"");
-const tomlStr=(file,key)=>{if(!fs.existsSync(file))return"";const re=new RegExp("^\\s*"+key.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*=\\s*\"([^\"]*)\"");for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const m=line.match(re);if(m)return m[1];}return"";};
+const tomlStr=(file,key)=>{if(!fs.existsSync(file))return"";const re=new RegExp("^\\s*"+key.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*=\\s*\"([^\"]*)\"");for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const m=line.match(re);if(m)return m[1];}return"";};const profileEnv=(p,key)=>p&&p.env&&typeof p.env==="object"&&p.env[key]?String(p.env[key]):"";const probeModelFor=(toolName,p,sec,legacyEnv,profPath)=>{if(p.probe_model)return String(p.probe_model);if(toolName==="claude")return sec.ANTHROPIC_MODEL||legacyEnv.ANTHROPIC_MODEL||profileEnv(p,"ANTHROPIC_MODEL")||process.env.ANTHROPIC_MODEL||sec.ANTHROPIC_DEFAULT_HAIKU_MODEL||legacyEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL||profileEnv(p,"ANTHROPIC_DEFAULT_HAIKU_MODEL")||process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL||"claude-3-5-haiku-20241022";return tomlStr(profPath,"model")||tomlStr(expand(p.home||"~/.codex")+"/config.toml","model")||"gpt-5.4-mini";};
 const legacyEnv={};const legacy=expand(P.linux_secret||P.secret||"");if(legacy&&fs.existsSync(legacy)){for(const line of fs.readFileSync(legacy,"utf8").split(/\r?\n/)){const m=line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(m)legacyEnv[m[1]]=m[2].trim();}}
 const secrets=parseSecrets(secretsPath);const sid=P.secret_id||(tool+"."+P.name);const sec=secrets[sid]||{};
 let baseOrigin="",headers={},probeModel="",secretOk=false;
-if(tool==="claude"){probeModel=P.probe_model||"claude-3-5-haiku-20241022";let b=sec.ANTHROPIC_BASE_URL||legacyEnv.ANTHROPIC_BASE_URL||P.base_url||router;baseOrigin=b.replace(/\/+$/,"");const at=sec.ANTHROPIC_AUTH_TOKEN||legacyEnv.ANTHROPIC_AUTH_TOKEN||process.env.ANTHROPIC_AUTH_TOKEN||"";const ak=sec.ANTHROPIC_API_KEY||legacyEnv.ANTHROPIC_API_KEY||process.env.ANTHROPIC_API_KEY||"";headers={"anthropic-version":"2023-06-01"};if(at)headers["Authorization"]="Bearer "+at;if(ak)headers["x-api-key"]=ak;headers["User-Agent"]=P.probe_ua||"claude-cli/1.0.119 (external, cli)";secretOk=!!(at||ak);
-}else{probeModel=P.probe_model||"gpt-5.4-mini";const profPath=expand((P.home||"~/.codex")+"/"+(P.codex_profile||P.profile||String(P.name||"").replace(":","-"))+".config.toml");let b=tomlStr(profPath,"base_url");if(!b)b=tomlStr(expand(P.home||"~/.codex")+"/config.toml","openai_base_url");if(!b)b="built-in OpenAI/ChatGPT endpoint";baseOrigin=b.replace(/\/+$/,"");const k=sec.OPENAI_API_KEY||sec.CODEX_API_KEY||legacyEnv.OPENAI_API_KEY||"";headers=k?{"Authorization":"Bearer "+k}:{};headers["User-Agent"]=P.probe_ua||"codex_cli_rs/0.40.0 (external, cli)";secretOk=!!k;}
+if(tool==="claude"){probeModel=probeModelFor(tool,P,sec,legacyEnv,"");let b=sec.ANTHROPIC_BASE_URL||legacyEnv.ANTHROPIC_BASE_URL||P.base_url||router;baseOrigin=b.replace(/\/+$/,"");const at=sec.ANTHROPIC_AUTH_TOKEN||legacyEnv.ANTHROPIC_AUTH_TOKEN||process.env.ANTHROPIC_AUTH_TOKEN||"";const ak=sec.ANTHROPIC_API_KEY||legacyEnv.ANTHROPIC_API_KEY||process.env.ANTHROPIC_API_KEY||"";headers={"anthropic-version":"2023-06-01"};if(at)headers["Authorization"]="Bearer "+at;if(ak)headers["x-api-key"]=ak;headers["User-Agent"]=P.probe_ua||"claude-cli/1.0.119 (external, cli)";secretOk=!!(at||ak);
+}else{const profPath=expand((P.home||"~/.codex")+"/"+(P.codex_profile||P.profile||String(P.name||"").replace(":","-"))+".config.toml");probeModel=probeModelFor(tool,P,sec,legacyEnv,profPath);let b=tomlStr(profPath,"base_url");if(!b)b=tomlStr(expand(P.home||"~/.codex")+"/config.toml","openai_base_url");if(!b)b="built-in OpenAI/ChatGPT endpoint";baseOrigin=b.replace(/\/+$/,"");const k=sec.OPENAI_API_KEY||sec.CODEX_API_KEY||legacyEnv.OPENAI_API_KEY||"";headers=k?{"Authorization":"Bearer "+k}:{};headers["User-Agent"]=P.probe_ua||"codex_cli_rs/0.40.0 (external, cli)";secretOk=!!k;}
 if(!baseOrigin||/^built-in/.test(baseOrigin)){out({status:"down",latencyMs:0,method:"none",error:"missing base_url"});process.exit(0);}
 if(!secretOk){out({status:"down",latencyMs:0,method:"none",error:"missing credentials"});process.exit(0);}
 let urls=[];
 if(tool==="claude"){const apiBase=/\/v1$/.test(baseOrigin)?baseOrigin.replace(/\/v1$/,""):baseOrigin;urls.push(apiBase+"/v1/messages");}
 else{const hasVer=/\/v\d+$/.test(baseOrigin);const apiBase=hasVer?baseOrigin:baseOrigin+"/v1";urls.push(apiBase+"/responses");urls.push(apiBase+"/chat/completions");}
 const bodyFor=(u)=>u.endsWith("/responses")?JSON.stringify({model:probeModel,input:".",max_output_tokens:1}):JSON.stringify({model:probeModel,max_tokens:1,messages:[{role:"user",content:"."}]});
-const req=(u)=>new Promise((resolve)=>{const t0=Date.now();let done=false;const fin=(r)=>{if(!done){done=true;r.latencyMs=Date.now()-t0;resolve(r);}};const obj=new URL(u);const lib=obj.protocol==="http:"?http:https;const body=bodyFor(u);const r=lib.request(obj,{method:"POST",headers:{...headers,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)},timeout:20000},(res)=>{let d="";res.on("data",(c)=>d+=c);res.on("end",()=>fin({ok:res.statusCode>=200&&res.statusCode<300,code:res.statusCode,body:d}));});r.on("timeout",()=>{r.destroy();fin({ok:false,code:0,body:"",err:"timeout"});});r.on("error",(e)=>fin({ok:false,code:0,body:"",err:probeErr(e.message)}));r.write(body);r.end();});
-(async()=>{let lastErr=null,anyTransient=false;for(const u of urls){const r=await req(u);if(r.ok){let valid=true;try{const j=JSON.parse(r.body);if(u.endsWith("/messages"))valid=(Array.isArray(j.content)&&j.content.length>0)||j.type==="message";else if(u.endsWith("/responses"))valid=(Array.isArray(j.output)&&j.output.length>0)||j.output_text||j.status==="completed";else valid=Array.isArray(j.choices)&&j.choices.length>0;}catch{valid=false;}if(valid){const st=r.latencyMs>degradedMs?"degraded":"healthy";return out({status:st,latencyMs:r.latencyMs,method:"generation",error:null});}lastErr="200 but no generated content";}else{lastErr=r.code?("HTTP "+r.code):(r.err||"request failed");if(r.code===429||(r.code>=500&&r.code<600))anyTransient=true;}}
-if(anyTransient)return out({status:"degraded",latencyMs:0,method:"none",error:String(lastErr)+(anyTransient?" (transient)":"")});
-return out({status:"down",latencyMs:0,method:"none",error:String(lastErr)});
+const req=(u)=>new Promise((resolve)=>{const t0=Date.now();let done=false;const fin=(r)=>{if(!done){done=true;r.latencyMs=Date.now()-t0;resolve(r);}};const obj=new URL(u);const lib=obj.protocol==="http:"?http:https;const body=bodyFor(u);const r=lib.request(obj,{method:"POST",headers:{...headers,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)},timeout:20000},(res)=>{let d="";res.on("data",(c)=>d+=c);res.on("end",()=>{const detail=d.replace(/\s+/g," ").trim().slice(0,240);fin({ok:res.statusCode>=200&&res.statusCode<300,code:res.statusCode,body:d,err:detail?"HTTP "+res.statusCode+" "+detail:"HTTP "+res.statusCode});});});r.on("timeout",()=>{r.destroy();fin({ok:false,code:0,body:"",err:"timeout"});});r.on("error",(e)=>fin({ok:false,code:0,body:"",err:probeErr(e.message)}));r.write(body);r.end();});const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported/.test(String(x||"").toLowerCase());const compactErr=(x)=>modelUnsupported(x)?"probe model unsupported; set probe_model":String(x||"");
+(async()=>{let lastErr=null,anyTransient=false;for(const u of urls){const r=await req(u);if(r.ok){let valid=true;try{const j=JSON.parse(r.body);if(u.endsWith("/messages"))valid=(Array.isArray(j.content)&&j.content.length>0)||j.type==="message";else if(u.endsWith("/responses"))valid=(Array.isArray(j.output)&&j.output.length>0)||j.output_text||j.status==="completed";else valid=Array.isArray(j.choices)&&j.choices.length>0;}catch{valid=false;}if(valid){const st=r.latencyMs>degradedMs?"degraded":"healthy";return out({status:st,latencyMs:r.latencyMs,method:"generation",error:null});}lastErr="200 but no generated content";}else{lastErr=r.err||(r.code?("HTTP "+r.code):"request failed");if(modelUnsupported(lastErr))return out({status:"degraded",latencyMs:r.latencyMs||0,method:"none",error:compactErr(lastErr)});if(r.code===429||(r.code>=500&&r.code<600))anyTransient=true;}}
+if(anyTransient)return out({status:"degraded",latencyMs:0,method:"none",error:compactErr(lastErr)+(anyTransient?" (transient)":"")});
+return out({status:"down",latencyMs:0,method:"none",error:compactErr(lastErr)});
 })();
 ' "$tool" "$profile_json" "$AI_SECRETS_PATH" "$CLAUDE_ROUTER_BASE_URL"
 }
@@ -1585,7 +1593,7 @@ _ai_set_probe_model() {
   local parsed name model
   parsed="$(_ai_parse_management_args "$@")" || return
   name="$(_ai_mgmt_positional "$parsed" 0)"
-  [ -n "$name" ] || { echo "Usage: probe-model <name> [model]  (omit model to clear)" >&2; return 1; }
+  [ -n "$name" ] || { echo "Usage: probe-model <name> [model]  (omit model to clear -> automatic probe model)" >&2; return 1; }
   model="$(_ai_mgmt_positional "$parsed" 1)"
   _ai_profile_json "$tool" "$name" >/dev/null || { echo "$tool profile '$name' not found." >&2; return 1; }
   local res
@@ -1596,7 +1604,7 @@ for(const x of r[tool]||[]){const names=[x.name,...(x.aliases||[])].filter(Boole
 process.exit(1);
 ' "$AI_REGISTRY_PATH" "$tool" "$name" "$model")" || { echo "$tool profile '$name' not found." >&2; return 1; }
   local pname act; pname="${res%%	*}"; act="${res#*	}"
-  if [ "$act" = "set" ]; then echo "Set $tool '$pname' probe_model = $model"; else echo "Cleared $tool '$pname' probe_model (back to default)"; fi
+  if [ "$act" = "set" ]; then echo "Set $tool '$pname' probe_model = $model"; else echo "Cleared $tool '$pname' probe_model (using automatic probe model)"; fi
 }
 
 _ai_set_default() {

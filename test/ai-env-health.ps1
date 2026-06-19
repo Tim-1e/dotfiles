@@ -70,6 +70,14 @@ try {
   $pm2 = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name hgood)).ProbeModel
   Assert-Eq "probe_model cleared -> default haiku" $pm2 "claude-3-5-haiku-20241022"
 
+  Add-AiTomlSecretValue -SecretId "claude.hgood" -Key "ANTHROPIC_MODEL" -Value "secret-sonnet" | Out-Null
+  $pm3 = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name hgood)).ProbeModel
+  Assert-Eq "probe_model clear -> ANTHROPIC_MODEL" $pm3 "secret-sonnet"
+
+  cc add-api envmodel --base-url https://h.test --env ANTHROPIC_DEFAULT_HAIKU_MODEL=env-haiku | Out-Null
+  $pm4 = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name envmodel)).ProbeModel
+  Assert-Eq "probe_model clear -> profile haiku env" $pm4 "env-haiku"
+
   Write-Host "[3] default show / set"
   cc default hbad | Out-Null
   Assert-Eq "default set" (Get-AiDefaultProfileName -Tool claude) "hbad"

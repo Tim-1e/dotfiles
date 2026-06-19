@@ -54,6 +54,26 @@ function tomlStr(file, key) {
   }
   return '';
 }
+function profileEnv(p, key) {
+  return p && p.env && typeof p.env === 'object' && p.env[key] ? String(p.env[key]) : '';
+}
+function probeModelFor(toolName, p, sec, legacyEnv, profPath) {
+  if (p.probe_model) return String(p.probe_model);
+  if (toolName === 'claude') {
+    return sec.ANTHROPIC_MODEL ||
+      legacyEnv.ANTHROPIC_MODEL ||
+      profileEnv(p, 'ANTHROPIC_MODEL') ||
+      process.env.ANTHROPIC_MODEL ||
+      sec.ANTHROPIC_DEFAULT_HAIKU_MODEL ||
+      legacyEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL ||
+      profileEnv(p, 'ANTHROPIC_DEFAULT_HAIKU_MODEL') ||
+      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL ||
+      'claude-3-5-haiku-20241022';
+  }
+  return tomlStr(profPath, 'model') ||
+    tomlStr(expand(p.home || '~/.codex') + '/config.toml', 'model') ||
+    'gpt-5.4-mini';
+}
 
 // ---------- probe one profile ----------
 function buildPlan(p) {
@@ -73,7 +93,7 @@ function buildPlan(p) {
   }
   let baseOrigin = '', headers = {}, probeModel = '';
   if (tool === 'claude') {
-    probeModel = p.probe_model || 'claude-3-5-haiku-20241022';
+    probeModel = probeModelFor(tool, p, sec, legacyEnv, '');
     const b = sec.ANTHROPIC_BASE_URL || legacyEnv.ANTHROPIC_BASE_URL || p.base_url || '';
     baseOrigin = b.replace(/\/+$/, '');
     const at = sec.ANTHROPIC_AUTH_TOKEN || legacyEnv.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_AUTH_TOKEN || '';
@@ -84,8 +104,8 @@ function buildPlan(p) {
     headers['User-Agent'] = p.probe_ua || 'claude-cli/1.0.119 (external, cli)';
     if (!at && !ak) return { early: { status: 'down', latencyMs: 0, method: null, error: 'missing credentials' } };
   } else {
-    probeModel = p.probe_model || 'gpt-5.4-mini';
     const profPath = expand((p.home || '~/.codex') + '/' + (p.codex_profile || p.profile || String(p.name || '').replace(':', '-')) + '.config.toml');
+    probeModel = probeModelFor(tool, p, sec, legacyEnv, profPath);
     let b = tomlStr(profPath, 'base_url');
     if (!b) b = tomlStr(expand(p.home || '~/.codex') + '/config.toml', 'openai_base_url');
     if (!b) b = 'built-in OpenAI/ChatGPT endpoint';
@@ -136,7 +156,8 @@ function fetchOne(c, headers) {
             else valid = Array.isArray(j.choices) && j.choices.length > 0;
           } catch {}
         }
-        fin({ ok: valid, code: res.statusCode, detail: valid ? null : (res.statusCode >= 200 && res.statusCode < 300 ? '200 but no generated content' : 'HTTP ' + res.statusCode) });
+        const compactBody = d.replace(/\s+/g, ' ').trim().slice(0, 240);
+        fin({ ok: valid, code: res.statusCode, detail: valid ? null : (res.statusCode >= 200 && res.statusCode < 300 ? '200 but no generated content' : ('HTTP ' + res.statusCode + (compactBody ? ' ' + compactBody : ''))) });
       });
     });
     req.on('timeout', () => { req.destroy(); fin({ detail: 'timeout' }); });
@@ -155,6 +176,14 @@ function classifyErr(m) {
   if (/econnreset|socket hang up|reset/.test(l)) return 'connection reset';
   return m;
 }
+function isModelUnsupported(detail) {
+  const l = ('' + detail).toLowerCase();
+  return /no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported/.test(l);
+}
+function probeErr(detail) {
+  if (isModelUnsupported(detail)) return 'probe model unsupported; set probe_model';
+  return detail || '';
+}
 async function probeProfile(p) {
   const plan = buildPlan(p);
   if (plan.early) return plan.early;
@@ -163,15 +192,17 @@ async function probeProfile(p) {
   if (tool === 'claude') {
     const m = results.messages;
     if (m.ok) return { status: m.latencyMs > DEGRADED_MS ? 'degraded' : 'healthy', latencyMs: m.latencyMs, method: 'generation', error: null };
-    if (m.code === 429 || (m.code >= 500 && m.code < 600)) return { status: 'degraded', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + (m.detail || '') + ' (transient)' };
-    return { status: 'down', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + (m.detail || '') };
+    if (isModelUnsupported(m.detail)) return { status: 'degraded', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + probeErr(m.detail) };
+    if (m.code === 429 || (m.code >= 500 && m.code < 600)) return { status: 'degraded', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + probeErr(m.detail) + ' (transient)' };
+    return { status: 'down', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + probeErr(m.detail) };
   }
   const eff = results[plan.effLabel], alt = results[plan.altLabel];
   if (eff.ok) return { status: eff.latencyMs > DEGRADED_MS ? 'degraded' : 'healthy', latencyMs: eff.latencyMs, method: 'generation:' + plan.effLabel, error: null };
-  let note = 'POST /' + plan.effLabel + ' -> ' + (eff.detail || '');
+  let note = 'POST /' + plan.effLabel + ' -> ' + probeErr(eff.detail);
   if (alt.ok) { note += '; but /' + plan.altLabel + ' works -> set wire_api = "' + plan.altLabel + '"'; return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
-  if (eff.code === 429 || (eff.code >= 500 && eff.code < 600)) { note += '; /' + plan.altLabel + ' -> ' + (alt.detail || '') + ' (transient)'; return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
-  note += '; /' + plan.altLabel + ' -> ' + (alt.detail || '');
+  if (isModelUnsupported(eff.detail) || isModelUnsupported(alt.detail)) { note += '; /' + plan.altLabel + ' -> ' + probeErr(alt.detail); return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
+  if (eff.code === 429 || (eff.code >= 500 && eff.code < 600)) { note += '; /' + plan.altLabel + ' -> ' + probeErr(alt.detail) + ' (transient)'; return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
+  note += '; /' + plan.altLabel + ' -> ' + probeErr(alt.detail);
   return { status: 'down', latencyMs: eff.latencyMs, method: 'none', error: note };
 }
 

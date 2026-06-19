@@ -152,6 +152,8 @@ assert_contains() {
   [ "$(_ai_profile_value "$(_ai_profile_json claude hgood)" probe_model "")" = "my-sonnet" ] || { echo "probe-model set failed" >&2; exit 1; }
   cc probe-model hgood >/dev/null 2>&1
   [ -z "$(_ai_profile_value "$(_ai_profile_json claude hgood)" probe_model "")" ] || { echo "probe-model clear failed" >&2; exit 1; }
+  cc add-api envmodel --base-url https://h.test --env ANTHROPIC_DEFAULT_HAIKU_MODEL=env-haiku >/dev/null 2>&1
+  [ "$(_ai_profile_value "$(_ai_profile_json claude envmodel)" env "")" != "" ] || { echo "profile env missing after add-api --env" >&2; exit 1; }
   cc default hbad >/dev/null 2>&1
   [ "$(_ai_default_profile claude)" = "hbad" ] || { echo "default set failed" >&2; exit 1; }
   rm -f "$AI_HEALTH_PATH"
