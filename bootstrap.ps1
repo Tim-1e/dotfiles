@@ -5,6 +5,29 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Add-PathEntry {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+    return
+  }
+
+  $processParts = @($env:PATH -split ";" | Where-Object { $_ })
+  if ($processParts -notcontains $Path) {
+    $env:PATH = "$Path;$env:PATH"
+  }
+
+  if ($env:GITHUB_PATH) {
+    $githubPathEntries = @()
+    if (Test-Path -LiteralPath $env:GITHUB_PATH) {
+      $githubPathEntries = @(Get-Content -LiteralPath $env:GITHUB_PATH -ErrorAction SilentlyContinue)
+    }
+    if ($githubPathEntries -notcontains $Path) {
+      Add-Content -LiteralPath $env:GITHUB_PATH -Value $Path
+    }
+  }
+}
+
 function Install-ChezmoiFromGitHub {
   $archMap = @{
     X64 = "amd64"
@@ -37,10 +60,7 @@ function Install-ChezmoiFromGitHub {
     }
 
     Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $binDir "chezmoi.exe") -Force
-    $env:PATH = "$binDir;$env:PATH"
-    if ($env:GITHUB_PATH) {
-      Add-Content -LiteralPath $env:GITHUB_PATH -Value $binDir
-    }
+    Add-PathEntry -Path $binDir
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $pathParts = @($userPath -split ";" | Where-Object { $_ })
@@ -56,6 +76,8 @@ function Install-ChezmoiFromGitHub {
 if (-not (Get-Command chezmoi -ErrorAction SilentlyContinue)) {
   if (Get-Command winget -ErrorAction SilentlyContinue) {
     winget install --id twpayne.chezmoi -e --source winget --accept-package-agreements --accept-source-agreements
+    Add-PathEntry -Path (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links")
+    Add-PathEntry -Path (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps")
   }
 
   if (-not (Get-Command chezmoi -ErrorAction SilentlyContinue)) {
