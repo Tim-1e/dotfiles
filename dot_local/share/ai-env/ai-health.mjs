@@ -178,11 +178,39 @@ function classifyErr(m) {
 }
 function isModelUnsupported(detail) {
   const l = ('' + detail).toLowerCase();
-  return /no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported/.test(l);
+  return /no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(l);
 }
-function probeErr(detail) {
+function compactHttpDetail(detail) {
+  const text = String(detail || '').replace(/\s+/g, ' ').trim();
+  const http = text.match(/^(HTTP \d{3})(?:\s+(.+))?$/);
+  if (!http) return text;
+  const code = http[1];
+  const body = http[2] || '';
+  if (!body) return code;
+  try {
+    const j = JSON.parse(body);
+    const msg = j?.error?.message || j?.message || j?.error || j?.type || '';
+    if (msg) return code + ' ' + String(msg).replace(/\s+/g, ' ').trim();
+  } catch {}
+  const msg = body.match(/"message"\s*:\s*"([^"]+)"/) || body.match(/message=([^,;}]+)/);
+  if (msg) return code + ' ' + msg[1].replace(/\s+/g, ' ').trim();
+  return text;
+}
+function displayProbeErr(detail) {
   if (isModelUnsupported(detail)) return 'probe model unsupported; set probe_model';
-  return detail || '';
+  return compactHttpDetail(detail);
+}
+function displayNote(error) {
+  const text = String(error || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const single = text.match(/^(POST\s+\/\S+\s+)(.+)$/);
+  const dual = text.match(/^(POST\s+\/\S+\s+->\s+)(.+?)(;\s+\/\S+\s+->\s+)(.+)$/);
+  if (dual) return dual[1] + displayProbeErr(dual[2]) + dual[3] + displayProbeErr(dual[4]);
+  const wire = text.match(/^(POST\s+\/\S+\s+->\s+)(.+?)(;\s+but\s+\/\S+\s+works\s+->\s+.+)$/);
+  if (wire) return wire[1] + displayProbeErr(wire[2]) + wire[3];
+  if (single && !single[2].includes('; /')) return single[1] + displayProbeErr(single[2]);
+  if (isModelUnsupported(text)) return displayProbeErr(text);
+  return compactHttpDetail(text);
 }
 async function probeProfile(p) {
   const plan = buildPlan(p);
@@ -192,17 +220,17 @@ async function probeProfile(p) {
   if (tool === 'claude') {
     const m = results.messages;
     if (m.ok) return { status: m.latencyMs > DEGRADED_MS ? 'degraded' : 'healthy', latencyMs: m.latencyMs, method: 'generation', error: null };
-    if (isModelUnsupported(m.detail)) return { status: 'degraded', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + probeErr(m.detail) };
-    if (m.code === 429 || (m.code >= 500 && m.code < 600)) return { status: 'degraded', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + probeErr(m.detail) + ' (transient)' };
-    return { status: 'down', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + probeErr(m.detail) };
+    if (isModelUnsupported(m.detail)) return { status: 'degraded', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + (m.detail || '') };
+    if (m.code === 429 || (m.code >= 500 && m.code < 600)) return { status: 'degraded', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + (m.detail || '') + ' (transient)' };
+    return { status: 'down', latencyMs: m.latencyMs, method: 'none', error: 'POST /v1/messages ' + (m.detail || '') };
   }
   const eff = results[plan.effLabel], alt = results[plan.altLabel];
   if (eff.ok) return { status: eff.latencyMs > DEGRADED_MS ? 'degraded' : 'healthy', latencyMs: eff.latencyMs, method: 'generation:' + plan.effLabel, error: null };
-  let note = 'POST /' + plan.effLabel + ' -> ' + probeErr(eff.detail);
+  let note = 'POST /' + plan.effLabel + ' -> ' + (eff.detail || '');
   if (alt.ok) { note += '; but /' + plan.altLabel + ' works -> set wire_api = "' + plan.altLabel + '"'; return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
-  if (isModelUnsupported(eff.detail) || isModelUnsupported(alt.detail)) { note += '; /' + plan.altLabel + ' -> ' + probeErr(alt.detail); return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
-  if (eff.code === 429 || (eff.code >= 500 && eff.code < 600)) { note += '; /' + plan.altLabel + ' -> ' + probeErr(alt.detail) + ' (transient)'; return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
-  note += '; /' + plan.altLabel + ' -> ' + probeErr(alt.detail);
+  if (isModelUnsupported(eff.detail) || isModelUnsupported(alt.detail)) { note += '; /' + plan.altLabel + ' -> ' + (alt.detail || ''); return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
+  if (eff.code === 429 || (eff.code >= 500 && eff.code < 600)) { note += '; /' + plan.altLabel + ' -> ' + (alt.detail || '') + ' (transient)'; return { status: 'degraded', latencyMs: eff.latencyMs, method: 'none', error: note }; }
+  note += '; /' + plan.altLabel + ' -> ' + (alt.detail || '');
   return { status: 'down', latencyMs: eff.latencyMs, method: 'none', error: note };
 }
 
@@ -216,14 +244,52 @@ function cell(r) {
   return '?';
 }
 const SPIN = ['-', '\\', '|', '/'];
-function trunc(s, n) { return s && s.length > n ? s.slice(0, n) : (s || ''); }
+function charWidth(cp) {
+  if (cp === 0) return 0;
+  if (cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0;
+  if (cp >= 0x1100 && (
+    cp <= 0x115f || cp === 0x2329 || cp === 0x232a ||
+    (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe10 && cp <= 0xfe19) ||
+    (cp >= 0xfe30 && cp <= 0xfe6f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff)
+  )) return 2;
+  return 1;
+}
+function displayWidth(s) {
+  let w = 0;
+  for (const ch of String(s || '')) w += charWidth(ch.codePointAt(0));
+  return w;
+}
+function padDisplay(s, n) {
+  const text = String(s || '');
+  return text + ' '.repeat(Math.max(0, n - displayWidth(text)));
+}
+function trunc(s, n) {
+  const text = String(s || '');
+  if (displayWidth(text) <= n) return text;
+  const suffix = n > 3 ? '...' : '';
+  const limit = Math.max(0, n - displayWidth(suffix));
+  let out = '', w = 0;
+  for (const ch of text) {
+    const cw = charWidth(ch.codePointAt(0));
+    if (w + cw > limit) break;
+    out += ch;
+    w += cw;
+  }
+  return out + suffix;
+}
 function buildTable(rows, saved, tick) {
   const cols = process.stdout.columns || 100;
   const w = { sel: 2, name: 14, health: 10, method: 12 };
   const noteW = Math.max(20, cols - (w.sel + w.name + w.health + w.method + 5));
   const lines = [];
   const fmt = (a, b, c, d, e) =>
-    `${String(a).padEnd(w.sel)} ${String(b).padEnd(w.name)} ${String(c).padEnd(w.health)} ${String(d).padEnd(w.method)} ${trunc(e, noteW)}`;
+    `${padDisplay(a, w.sel)} ${padDisplay(b, w.name)} ${padDisplay(c, w.health)} ${padDisplay(d, w.method)} ${trunc(e, noteW)}`;
   lines.push(fmt('Sel', 'Name', 'Health', 'Method', 'Note'));
   lines.push(fmt('---', '----', '------', '------', '----'));
   for (const r of rows) {
@@ -232,7 +298,7 @@ function buildTable(rows, saved, tick) {
       const sp = SPIN[tick % SPIN.length];
       lines.push(fmt(sel, r.name, '⏳', '-', 'checking ' + sp));
     } else {
-      lines.push(fmt(sel, r.name, cell(r), r.method || '-', r.error || ''));
+      lines.push(fmt(sel, r.name, cell(r), r.method || '-', displayNote(r.error)));
     }
   }
   return lines.join('\n');

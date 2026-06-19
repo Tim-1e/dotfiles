@@ -38,12 +38,15 @@ try {
   . (Join-Path $SourceDir "Documents/PowerShell/Scripts/ai-env.ps1")
 
   # --- FAKE the network probe: map profile names to canned health (no HTTP) ---
+  $script:ProbeCalls = 0
   function Get-AiProfileHealth {
     param($Tool, $Profile, $TimeoutSec = 20, $DegradedMs = 6000)
+    $script:ProbeCalls += 1
     switch (Get-AiProfileName -Profile $Profile) {
       "hgood" { [pscustomobject]@{ Status = "healthy";  LatencyMs = 120;  Method = "generation"; Error = $null } }
       "hbad"  { [pscustomobject]@{ Status = "down";     LatencyMs = 0;    Method = "none"; Error = "POST /v1/messages HTTP 401" } }
       "hslow" { [pscustomobject]@{ Status = "degraded"; LatencyMs = 9999; Method = "generation"; Error = "POST /v1/messages HTTP 429 (transient)" } }
+      "hcn"   { [pscustomobject]@{ Status = "degraded"; LatencyMs = 10;   Method = "none"; Error = 'POST /v1/messages HTTP 400 {"type":"error","error":{"message":"[1211][模型不存在，请检查模型代码。]"}}' } }
       default { [pscustomobject]@{ Status = "down"; LatencyMs = 0; Method = "none"; Error = "POST /v1/messages HTTP 404" } }
     }
   }
@@ -53,6 +56,7 @@ try {
   cc add-api hgood --base-url https://h.test | Out-Null
   cc add-api hbad  --base-url https://h.test | Out-Null
   cc add-api hslow --base-url https://h.test | Out-Null
+  cc add-api hcn   --base-url https://h.test | Out-Null
   cc add-api cyc-a --base-url https://h.test | Out-Null
   cc add-api cyc-b --base-url https://h.test | Out-Null
 
@@ -70,7 +74,12 @@ try {
   $pm2 = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name hgood)).ProbeModel
   Assert-Eq "probe_model cleared -> default haiku" $pm2 "claude-3-5-haiku-20241022"
 
-  Add-AiTomlSecretValue -SecretId "claude.hgood" -Key "ANTHROPIC_MODEL" -Value "secret-sonnet" | Out-Null
+  @(
+    ""
+    "[claude.hgood]"
+    'ANTHROPIC_MODEL = "secret-sonnet"'
+    'ANTHROPIC_AUTH_TOKEN = "sk-test-hgood"'
+  ) | Add-Content -LiteralPath $secretsPath -Encoding UTF8
   $pm3 = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name hgood)).ProbeModel
   Assert-Eq "probe_model clear -> ANTHROPIC_MODEL" $pm3 "secret-sonnet"
 
@@ -123,6 +132,37 @@ try {
   Assert-Match "list has Health col" $listOut "Health"
   if ($keysAfter -ne $keysBefore) { throw "cc list probed live (cache keys $keysBefore->$keysAfter); list must be cache-only" }
   Write-Host "  ok: list shows cached Health, did NOT probe (cache keys unchanged)"
+
+  Write-Host "[9] status/switch show probe model and status --fresh probes"
+  Save-AiSelectedProfile -Tool claude -Name hgood
+  Remove-Item Env:AI_CLAUDE_LABEL -ErrorAction SilentlyContinue
+  $beforeStatus = $script:ProbeCalls
+  $statusOut = (& { cc status } 6>&1 | Out-String -Width 4096)
+  Assert-Match "status has probe model" $statusOut "Probe model: secret-sonnet"
+  Assert-Match "status has Health" $statusOut "Health:"
+  Assert-Eq "status cache-only probe count" $script:ProbeCalls $beforeStatus
+  $freshOut = (& { cc status --fresh } 6>&1 | Out-String -Width 4096)
+  Assert-Match "status fresh has probe model" $freshOut "Probe model:"
+  if ($script:ProbeCalls -le $beforeStatus) { throw "cc status --fresh did not call live probe" }
+  $switchOut = (& { cc hgood } 6>&1 | Out-String -Width 4096)
+  Assert-Match "switch has probe model" $switchOut "Probe model: secret-sonnet"
+  Assert-Match "switch has Health" $switchOut "Health:"
+
+  Write-Host "[10] health table shortens Chinese unsupported model note"
+  Clear-AiHealthCache
+  $pcn = Get-AiProfileByName -Tool claude -Name hcn
+  $cn = Get-AiProfileHealthCached -Tool claude -Profile $pcn -Fresh
+  Write-AiHealthCacheEntry -Key "claude.hcn" -Entry ([pscustomobject]@{
+      status = $cn.Status; latencyMs = $cn.LatencyMs; method = $cn.Method; error = $cn.Error; probedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    })
+  $short = ConvertTo-AiHealthDisplayError $cn.Error
+  Assert-Match "Chinese model note short" $short "probe model unsupported; set probe_model"
+  if ($cn.Error -notmatch "模型不存在") { throw "cached/status error should preserve original Chinese detail" }
+  Save-AiSelectedProfile -Tool claude -Name hcn
+  Remove-Item Env:AI_CLAUDE_LABEL -ErrorAction SilentlyContinue
+  $statusCn = (& { cc status --fresh } 6>&1 | Out-String -Width 4096)
+  Assert-Match "status preserves Chinese detail" $statusCn "模型不存在"
+  Assert-Match "status Chinese has probe model" $statusCn "Probe model:"
 
   Write-Host ""
   Write-Host "AI env health check passed." -ForegroundColor Green

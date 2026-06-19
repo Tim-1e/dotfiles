@@ -22,6 +22,8 @@ $secretsPath = Join-Path $secretsDir "secrets.toml"
 try {
   New-Item -ItemType Directory -Force -Path $aiEnvDir, $codexDir, $secretsDir | Out-Null
   Copy-Item -LiteralPath (Join-Path $SourceDir "dot_ai-env/create_profiles.json") -Destination $profilesPath -Force
+  Copy-Item -LiteralPath (Join-Path $SourceDir "dot_codex/create_sub.config.toml") -Destination (Join-Path $codexDir "sub.config.toml") -Force
+  Copy-Item -LiteralPath (Join-Path $SourceDir "dot_codex/create_api.config.toml") -Destination (Join-Path $codexDir "api.config.toml") -Force
   $sessionDir = Join-Path $codexDir "sessions\2026\06\09"
   New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
   @'
@@ -68,9 +70,16 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-envtoken"
   $ccSwitch = (& { cc api:docker } 6>&1 | Out-String -Width 4096)
 
   if ($cxHelp -notmatch "cx - switch Codex state") { throw "cx help output missing header" }
+  if ($cxHelp -notmatch "Auto-select a cached healthy Codex profile") { throw "cx help output missing auto-select wording" }
+  if ($cxHelp -notmatch "cx edit") { throw "cx help output missing edit" }
+  if ($cxHelp -notmatch "cx doctor") { throw "cx help output missing doctor" }
+  if ($cxHelp -notmatch "cx next") { throw "cx help output missing next" }
   if ($cxList -notmatch "Codex profiles") { throw "cx list output missing header" }
   if ($cxList -notmatch "Health") { throw "cx list missing Health column" }
   if ($ccHelp -notmatch "cc - switch Claude Code state") { throw "cc help output missing header" }
+  if ($ccHelp -notmatch "Auto-select a cached healthy Claude Code profile") { throw "cc help output missing auto-select wording" }
+  if ($ccHelp -notmatch "cc edit") { throw "cc help output missing edit" }
+  if ($ccHelp -notmatch "cc next") { throw "cc help output missing next" }
   if ($ccList -notmatch "Claude Code profiles") { throw "cc list output missing header" }
   if ($ccList -notmatch "Health") { throw "cc list missing Health column" }
   if ($cxStats -notmatch "Codex local token stats") { throw "cx stats output missing header" }
@@ -92,8 +101,10 @@ ANTHROPIC_AUTH_TOKEN = "sk-test-envtoken"
   if ($ccRemoveSub -notmatch "Removed Claude Code profile 'sub:test'") { throw "cc remove sub did not report success" }
   if (Test-Path -LiteralPath $codexApiTestConfig) { throw "cx remove --delete-config did not remove Codex config" }
   if ($cxSwitch -notmatch "Secret source: .*secrets\.toml#codex\.api") { throw "cx api did not load TOML secret" }
+  if ($cxSwitch -notmatch "API local check: profile file=True; key=True") { throw "cx api switch missing local check" }
   if ($openAiKey -ne "sk-test-codex") { throw "cx api did not set OPENAI_API_KEY from TOML" }
   if ($ccSwitch -notmatch "Secret source: .*secrets\.toml#claude\.api-docker") { throw "cc api:docker did not load TOML secret" }
+  if ($ccSwitch -notmatch "API local check: auth=True; url=True") { throw "cc api switch missing local check" }
   if ($env:ANTHROPIC_AUTH_TOKEN -ne "sk-test-token") { throw "cc api:docker did not set ANTHROPIC_AUTH_TOKEN from TOML" }
   if ($env:CODEX_HOME -ne $codexDir) { throw "Unexpected CODEX_HOME: $env:CODEX_HOME" }
 

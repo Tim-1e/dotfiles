@@ -89,15 +89,24 @@ assert_contains() {
   run_step cc-remove-sub cc remove sub:test
 
   assert_contains "cx - switch Codex state" "$debug_dir/cx-help.out"
+  assert_contains "Auto-select a cached healthy Codex profile" "$debug_dir/cx-help.out"
   assert_contains "cx add-api NAME" "$debug_dir/cx-help.out"
+  assert_contains "cx edit" "$debug_dir/cx-help.out"
+  assert_contains "cx doctor" "$debug_dir/cx-help.out"
+  assert_contains "cx next" "$debug_dir/cx-help.out"
   assert_contains "Codex profiles" "$debug_dir/cx-list.out"
-  assert_contains "secrets.toml#codex.api" "$debug_dir/cx-list.out"
+  assert_contains "Health" "$debug_dir/cx-list.out"
+  assert_contains "run 'cx health' to refresh" "$debug_dir/cx-list.out"
   assert_contains "Codex local token stats" "$debug_dir/cx-stats.out"
   assert_contains "Total: 1.2K (1200)" "$debug_dir/cx-stats.out"
   assert_contains "cc - switch Claude Code state" "$debug_dir/cc-help.out"
+  assert_contains "Auto-select a cached healthy Claude Code profile" "$debug_dir/cc-help.out"
   assert_contains "cc add-api NAME" "$debug_dir/cc-help.out"
+  assert_contains "cc edit" "$debug_dir/cc-help.out"
+  assert_contains "cc next" "$debug_dir/cc-help.out"
   assert_contains "Claude Code profiles" "$debug_dir/cc-list.out"
-  assert_contains "secrets.toml#claude.api-docker" "$debug_dir/cc-list.out"
+  assert_contains "Health" "$debug_dir/cc-list.out"
+  assert_contains "run 'cc health' to refresh" "$debug_dir/cc-list.out"
   assert_contains "Added Codex API profile 'api:test'" "$debug_dir/cx-add-api.out"
   assert_contains "Added Codex subscription profile 'sub:test'" "$debug_dir/cx-add-sub.out"
   assert_contains "Added Claude Code API profile 'api:test'" "$debug_dir/cc-add-api.out"
@@ -135,19 +144,30 @@ assert_contains() {
   [ "${CODEX_EXTRA_FLAG:-}" = "on" ] || { echo "cx switch did not export profile env" >&2; exit 1; }
   cx api >"$debug_dir/cx-env-away.out" 2>&1
   [ -z "${CODEX_EXTRA_FLAG:-}" ] || { echo "cx switch-away did not clear profile env (leak)" >&2; exit 1; }
+  assert_contains "API local check: profile file=true; key=true" "$debug_dir/cx-env-away.out"
 
   # --- health: mock the network probe, test cache/cell/select/probe-model/default ---
+  probe_log="$debug_dir/probe.log"
+  : >"$probe_log"
   _ai_probe_health() {
+    printf '%s\n' "$(_ai_profile_value "$2" name "")" >>"$probe_log"
     case "$(_ai_profile_value "$2" name "")" in
-      hgood) printf '{"status":"healthy","latencyMs":120,"method":"generation","error":null}';;
-      hbad)  printf '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 401"}';;
-      hslow) printf '{"status":"degraded","latencyMs":9999,"method":"generation","error":"HTTP 429 (transient)"}';;
-      *)     printf '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 404"}';;
+      hgood) printf '%s' '{"status":"healthy","latencyMs":120,"method":"generation","error":null}';;
+      hbad)  printf '%s' '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 401"}';;
+      hslow) printf '%s' '{"status":"degraded","latencyMs":9999,"method":"generation","error":"HTTP 429 (transient)"}';;
+      hcn)   printf '%s' '{"status":"degraded","latencyMs":10,"method":"none","error":"POST /v1/messages HTTP 400 {\"type\":\"error\",\"error\":{\"message\":\"[1211][模型不存在，请检查模型代码。]\"}}"}';;
+      *)     printf '%s' '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 404"}';;
     esac
   }
   cc add-api hgood --base-url https://h.test >/dev/null 2>&1
   cc add-api hbad  --base-url https://h.test >/dev/null 2>&1
   cc add-api hslow --base-url https://h.test >/dev/null 2>&1
+  cc add-api hcn   --base-url https://h.test >/dev/null 2>&1
+  cat >>"$AI_SECRETS_PATH" <<'EOF'
+
+[claude.hgood]
+ANTHROPIC_AUTH_TOKEN = "sk-test-hgood"
+EOF
   cc probe-model hgood my-sonnet >/dev/null 2>&1
   [ "$(_ai_profile_value "$(_ai_profile_json claude hgood)" probe_model "")" = "my-sonnet" ] || { echo "probe-model set failed" >&2; exit 1; }
   cc probe-model hgood >/dev/null 2>&1
@@ -162,8 +182,32 @@ assert_contains() {
   [ -f "$AI_HEALTH_PATH" ] || { echo "health.json not written" >&2; exit 1; }
   case "$(_ai_health_cell "$r1")" in 🟢120ms) :;; *) echo "health cell wrong: $(_ai_health_cell "$r1")" >&2; exit 1;; esac
   [ "$(_ai_healthy_profile claude)" = "hgood" ] || { echo "auto-select did not skip down -> hgood" >&2; exit 1; }
-  cc status >/dev/null 2>&1
-  grep -q "Health:" < <(cc status 2>/dev/null) || { echo "cc status missing Health line" >&2; exit 1; }
+  cc hgood >"$debug_dir/cc-switch-hgood.out" 2>&1
+  assert_contains "Probe model: claude-3-5-haiku-20241022" "$debug_dir/cc-switch-hgood.out"
+  assert_contains "Health:" "$debug_dir/cc-switch-hgood.out"
+  probe_before="$(wc -l <"$probe_log")"
+  cc status >"$debug_dir/cc-status.out" 2>&1
+  assert_contains "Probe model: claude-3-5-haiku-20241022" "$debug_dir/cc-status.out"
+  assert_contains "Health:" "$debug_dir/cc-status.out"
+  [ "$(wc -l <"$probe_log")" = "$probe_before" ] || { echo "cc status without --fresh probed live" >&2; exit 1; }
+  cc status --fresh >"$debug_dir/cc-status-fresh.out" 2>&1
+  [ "$(wc -l <"$probe_log")" -gt "$probe_before" ] || { echo "cc status --fresh did not probe live" >&2; exit 1; }
+  assert_contains "Probe model:" "$debug_dir/cc-status-fresh.out"
+  assert_contains "Health:" "$debug_dir/cc-status-fresh.out"
+  short_health_note="$(_ai_health_display_error 'POST /v1/messages HTTP 400 {"type":"error","error":{"message":"[1211][模型不存在，请检查模型代码。]"}}')"
+  case "$short_health_note" in
+    *"probe model unsupported; set probe_model"*) : ;;
+    *) echo "Chinese unsupported model health note not shortened: $short_health_note" >&2; exit 1 ;;
+  esac
+  _ai_save_profile claude hcn
+  unset AI_CLAUDE_LABEL
+  cc status --fresh >"$debug_dir/cc-status-hcn-fresh.out" 2>&1
+  assert_contains "模型不存在" "$debug_dir/cc-status-hcn-fresh.out"
+  assert_contains "Probe model:" "$debug_dir/cc-status-hcn-fresh.out"
+  _ai_save_profile claude api:docker
+  cc api:docker >/dev/null 2>&1
+  cc api:docker >"$debug_dir/cc-switch-api-docker.out" 2>&1
+  assert_contains "API local check: auth=true; url=true" "$debug_dir/cc-switch-api-docker.out"
   cc health-clear; [ ! -f "$AI_HEALTH_PATH" ] || { echo "health-clear failed" >&2; exit 1; }
   mcp list >/dev/null 2>&1 || { echo "mcp command failed" >&2; exit 1; }
 

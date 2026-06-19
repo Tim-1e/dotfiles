@@ -1147,6 +1147,9 @@ function Get-AiProbeModel {
     [Parameter(Mandatory = $true)]$Profile
   )
 
+  if ((Get-AiProfileMode -Profile $Profile) -ne "api") {
+    return "-"
+  }
   $explicit = Get-AiProperty -Object $Profile -Name "probe_model"
   if ($explicit) {
     return [string]$explicit
@@ -1460,7 +1463,57 @@ function Test-AiProbeModelUnsupported {
   param([string]$Detail)
   if (-not $Detail) { return $false }
   $l = $Detail.ToLowerInvariant()
-  return ($l -match "no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported")
+  return ($l -match "no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码")
+}
+
+function ConvertTo-AiHealthDisplayError {
+  param([string]$Detail)
+  if (-not $Detail) { return "" }
+  $text = ($Detail -replace "\s+", " ").Trim()
+  function ShortProbeDetail([string]$Item) {
+    $itemText = ($Item -replace "\s+", " ").Trim()
+    if (Test-AiProbeModelUnsupported $itemText) {
+      return "probe model unsupported; set probe_model"
+    }
+    if ($itemText -match "^(HTTP \d{3})(?:\s+(.+))?$") {
+      $code = $Matches[1]
+      $body = if ($Matches.Count -gt 2) { $Matches[2] } else { "" }
+      if (-not $body) { return $code }
+      try {
+        $json = $body | ConvertFrom-Json -ErrorAction Stop
+        $msg = $null
+        if ($json.error -and $json.error.message) { $msg = [string]$json.error.message }
+        elseif ($json.message) { $msg = [string]$json.message }
+        elseif ($json.error) { $msg = [string]$json.error }
+        elseif ($json.type) { $msg = [string]$json.type }
+        if ($msg) { return ($code + " " + (($msg -replace "\s+", " ").Trim())) }
+      } catch { }
+      if ($body -match '"message"\s*:\s*"([^"]+)"') {
+        return ($code + " " + (($Matches[1] -replace "\s+", " ").Trim()))
+      }
+      return $itemText
+    }
+    return $itemText
+  }
+  if ($text -match "^(POST\s+/\S+\s+->\s+)(.+?)(;\s+/\S+\s+->\s+)(.+)$") {
+    $prefix = $Matches[1]
+    $first = $Matches[2]
+    $middle = $Matches[3]
+    $second = $Matches[4]
+    return $prefix + (ShortProbeDetail $first) + $middle + (ShortProbeDetail $second)
+  }
+  if ($text -match "^(POST\s+/\S+\s+->\s+)(.+?)(;\s+but\s+/\S+\s+works\s+->\s+.+)$") {
+    $prefix = $Matches[1]
+    $first = $Matches[2]
+    $suffix = $Matches[3]
+    return $prefix + (ShortProbeDetail $first) + $suffix
+  }
+  if ($text -match "^(POST\s+/\S+\s+)(.+)$") {
+    $prefix = $Matches[1]
+    $detail = $Matches[2]
+    return $prefix + (ShortProbeDetail $detail)
+  }
+  return ShortProbeDetail $text
 }
 
 function Resolve-AiProfileHealth {
@@ -1472,10 +1525,10 @@ function Resolve-AiProfileHealth {
       $st = if ($m.LatencyMs -gt $DegradedMs) { "degraded" } else { "healthy" }
       return [pscustomobject]@{ Status = $st; LatencyMs = $m.LatencyMs; Method = "generation"; Error = $null }
     }
-    $md = ConvertTo-AiProbeError $m.Detail
     if (Test-AiProbeModelUnsupported $m.Detail) {
-      return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $md) }
+      return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $m.Detail) }
     }
+    $md = ConvertTo-AiProbeError $m.Detail
     if ($m.Code -eq 429 -or ($m.Code -ge 500 -and $m.Code -lt 600)) {
       return [pscustomobject]@{ Status = "degraded"; LatencyMs = $m.LatencyMs; Method = "none"; Error = ("POST /v1/messages " + $md + " (transient)") }
     }
@@ -1491,15 +1544,16 @@ function Resolve-AiProfileHealth {
   }
   $effD = ConvertTo-AiProbeError $eff.Detail
   $altD = ConvertTo-AiProbeError $alt.Detail
-  $note = "POST /$($Plan.EffLabel) -> $effD"
+  $note = "POST /$($Plan.EffLabel) -> $($eff.Detail)"
   if ($alt.Ok) {
     $note += "; but /$($Plan.AltLabel) works -> set wire_api = `"$($Plan.AltLabel)`" in config.toml"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
   }
   if ((Test-AiProbeModelUnsupported $eff.Detail) -or (Test-AiProbeModelUnsupported $alt.Detail)) {
-    $note += "; /$($Plan.AltLabel) -> $altD"
+    $note += "; /$($Plan.AltLabel) -> $($alt.Detail)"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
   }
+  $note = "POST /$($Plan.EffLabel) -> $effD"
   if ($eff.Code -eq 429 -or ($eff.Code -ge 500 -and $eff.Code -lt 600)) {
     $note += "; /$($Plan.AltLabel) -> $altD (transient)"
     return [pscustomobject]@{ Status = "degraded"; LatencyMs = $eff.LatencyMs; Method = "none"; Error = $note }
@@ -2041,6 +2095,7 @@ function Write-CodexSwitchStatus {
     Write-Host "  Profile: <default> ($profilePath missing)"
   }
   Write-Host "  Base URL: $(Get-CodexBaseUrl -Profile $Profile)"
+  Write-Host "  Probe model: $(Get-AiProbeModel -Tool codex -Profile $Profile)"
   Write-Host "  Cached login: $(Get-CodexLoginStatusText)"
 
   if ($mode -eq "api") {
@@ -2069,6 +2124,7 @@ function Write-ClaudeSwitchStatus {
   Write-Host "Claude Code state switched: $(Get-AiProfileName -Profile $Profile)"
   Write-Host "  Run next: claude"
   Write-Host "  Registry: $script:AiRegistryPath"
+  Write-Host "  Probe model: $(Get-AiProbeModel -Tool claude -Profile $Profile)"
   if ($mode -eq "api") {
     Write-Host "  ANTHROPIC_BASE_URL: $env:ANTHROPIC_BASE_URL"
     Write-Host "  ANTHROPIC_API_KEY: $(Format-AiSecretPreview $env:ANTHROPIC_API_KEY)"
@@ -2080,6 +2136,8 @@ function Write-ClaudeSwitchStatus {
     Write-Host "  Subscription status: local Claude login is used if present"
   }
 
+  $h = Get-AiProfileHealthCached -Tool "claude" -Profile $Profile -CacheOnly
+  Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
   Write-ClaudeExternalStatus
 }
 
@@ -2088,13 +2146,13 @@ function Show-CxHelp {
 cx - switch Codex state for this PowerShell session
 
 Usage:
-  cx                 Cycle through enabled Codex profiles
+  cx                 Auto-select a cached healthy Codex profile (default fallback)
   cx sub             Use a named subscription profile
   cx sub:work        Use another subscription profile, if registered
   cx api             Use the default API profile
   cx api:docker      Use a named API profile
-  cx list            List registry profiles and local file status
-  cx status          Print current saved/process state; --refresh re-probes health
+  cx list            List registry profiles and cached health
+  cx status          Print current saved/process state; --fresh/--refresh re-probes selected profile
   cx stats           Summarize local rollout token usage
   cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
                      Options: --base-url URL --env-key NAME --provider-name NAME
@@ -2103,11 +2161,11 @@ Usage:
   cx add-sub NAME    Register an isolated Codex subscription CODEX_HOME
   cx remove NAME     Remove a Codex profile registration
   cx probe-model NAME [MODEL]  Set/clear health-probe model override
-  cx default [NAME]   Show/set the default (primary) profile
-  cx edit            Open the profile registry (profiles.json) in $EDITOR
-  cx health           Probe & report profile health (🟢🟡🔴, parallel); --fresh re-probes
-  cx doctor           Run codex doctor full diagnostic (slow, on-demand)
-  cx health-clear     Clear the health probe cache
+  cx default [NAME]  Show/set the default (primary) profile
+  cx edit            Open the profile registry (profiles.json) in EDITOR
+  cx health          Probe & report profile health table (🟢🟡🔴, parallel); --fresh/--refresh re-probes
+  cx doctor          Run codex doctor full diagnostic (slow, on-demand)
+  cx health-clear    Clear the health probe cache
   cx next            Cycle to the next enabled profile
   cx help            Show this help
 
@@ -2126,6 +2184,7 @@ Notes:
   API mode does not run codex login --with-api-key; it loads OPENAI_API_KEY only for this shell.
   Multiple API profiles can share ~/.codex. Multiple subscription accounts need separate home values.
   Add commands only write profile metadata and Codex config. Put real tokens in secrets.toml.
+  Without probe_model, Codex probes use runtime/global config.toml model, then a cheap fallback.
   Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
 }
@@ -2135,23 +2194,23 @@ function Show-CcHelp {
 cc - switch Claude Code state for this PowerShell session
 
 Usage:
-  cc                 Cycle through enabled Claude Code profiles
+  cc                 Auto-select a cached healthy Claude Code profile (default fallback)
   cc sub             Clear Anthropic API env and use local Claude subscription login
   cc sub:work        Use another subscription profile, if registered
   cc api             Use the default API profile
   cc api:docker      Use a named API profile
-  cc list            List registry profiles and local file status
-  cc status          Print current saved/process state; --refresh re-probes health
+  cc list            List registry profiles and cached health
+  cc status          Print current saved/process state; --fresh/--refresh re-probes selected profile
   cc add-api NAME    Register a Claude Code API profile
                      Options: --base-url URL --env-key NAME --env KEY=VALUE (repeatable)
                      Prompts for missing base-url and the secret in a terminal.
   cc add-sub NAME    Register a Claude Code subscription label
   cc remove NAME     Remove a Claude Code profile registration
   cc probe-model NAME [MODEL]  Set/clear health-probe model override
-  cc default [NAME]   Show/set the default (primary) profile
-  cc edit            Open the profile registry (profiles.json) in $EDITOR
-  cc health           Probe & report profile health (🟢🟡🔴, parallel); --fresh re-probes
-  cc health-clear     Clear the health probe cache
+  cc default [NAME]  Show/set the default (primary) profile
+  cc edit            Open the profile registry (profiles.json) in EDITOR
+  cc health          Probe & report profile health table (🟢🟡🔴, parallel); --fresh/--refresh re-probes
+  cc health-clear    Clear the health probe cache
   cc next            Cycle to the next enabled profile
   cc help            Show this help
 
@@ -2170,6 +2229,7 @@ Notes:
     CLAUDE_CODE_AUTO_COMPACT_WINDOW) stored in the registry; exported on switch and
     cleared when switching to another profile so values do not leak.
   Add commands only write profile metadata. Put real tokens in secrets.toml.
+  Without probe_model, Claude probes use ANTHROPIC_MODEL, ANTHROPIC_DEFAULT_HAIKU_MODEL, then a cheap fallback.
   Legacy ~/.ai-secrets/*.ps1 files are still accepted as a fallback.
 "@ | Write-Host
 }
@@ -2192,7 +2252,7 @@ function Format-AiHealthCell {
 function Test-AiFreshFlag {
   param([AllowNull()][string[]]$Tokens)
   if (-not $Tokens) { return $false }
-  foreach ($t in $Tokens) { if ($t -in @("--fresh", "-f")) { return $true } }
+  foreach ($t in $Tokens) { if ($t -in @("--fresh", "-f", "--refresh", "-r")) { return $true } }
   return $false
 }
 
@@ -2475,7 +2535,7 @@ function Show-AiHealth {
     $plan = Get-AiProfileProbePlan -Tool $Tool -Profile $p
     if ($plan.ContainsKey("Early")) {
       $e = $plan.Early
-      $display[$n] = @{ Health = (& $cellOf $e); Method = ($(if ($e.Method) { $e.Method } else { "-" })); Note = ($(if ($e.Error) { $e.Error } else { "" })); Pending = $false }
+      $display[$n] = @{ Health = (& $cellOf $e); Method = ($(if ($e.Method) { $e.Method } else { "-" })); Note = ($(if ($e.Error) { ConvertTo-AiHealthDisplayError $e.Error } else { "" })); Pending = $false }
       continue
     }
     $plans[$n] = $plan
@@ -2483,7 +2543,7 @@ function Show-AiHealth {
     if (-not $Fresh) {
       $cached = Get-AiProfileHealthCached -Tool $Tool -Profile $p -CacheOnly
       if ($cached.Cached) {
-        $display[$n] = @{ Health = (& $cellOf $cached); Method = ($(if ($cached.Method) { $cached.Method } else { "-" })); Note = ($(if ($cached.Error) { $cached.Error } else { "" })); Pending = $false }
+        $display[$n] = @{ Health = (& $cellOf $cached); Method = ($(if ($cached.Method) { $cached.Method } else { "-" })); Note = ($(if ($cached.Error) { ConvertTo-AiHealthDisplayError $cached.Error } else { "" })); Pending = $false }
         $useCache = $true
       }
     }
@@ -2552,7 +2612,7 @@ function Show-AiHealth {
     Write-AiHealthCacheEntry -Key "$Tool.$n" -Entry ([pscustomobject]@{
         status = $h.Status; latencyMs = $h.LatencyMs; method = $h.Method; error = $h.Error; probedAt = $now
       })
-    $display[$n] = @{ Health = (Format-AiHealthCell $h); Method = ($(if ($h.Method) { $h.Method } else { "-" })); Note = ($(if ($h.Error) { $h.Error } else { "" })); Pending = $false }
+    $display[$n] = @{ Health = (Format-AiHealthCell $h); Method = ($(if ($h.Method) { $h.Method } else { "-" })); Note = ($(if ($h.Error) { ConvertTo-AiHealthDisplayError $h.Error } else { "" })); Pending = $false }
   }
 
   $footer = "  (health " + ($(if ($Fresh) { "re-probed (fresh, parallel)" } else { "cached <=5min" })) + "; '" + $Tool + " health --fresh' re-probe, '" + $Tool + " health-clear' clears)"
@@ -2646,7 +2706,7 @@ foreach ($c in $Candidates) {
             $h = Resolve-AiProfileHealth -Plan $runspaces[$n].Plan -Results $results -DegradedMs $DegradedMs
             $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             Write-AiHealthCacheEntry -Key "$Tool.$n" -Entry ([pscustomobject]@{ status = $h.Status; latencyMs = $h.LatencyMs; method = $h.Method; error = $h.Error; probedAt = $now })
-            $display[$n] = @{ Health = (Format-AiHealthCell $h); Method = ($(if ($h.Method) { $h.Method } else { "-" })); Note = ($(if ($h.Error) { $h.Error } else { "" })); Pending = $false }
+            $display[$n] = @{ Health = (Format-AiHealthCell $h); Method = ($(if ($h.Method) { $h.Method } else { "-" })); Note = ($(if ($h.Error) { ConvertTo-AiHealthDisplayError $h.Error } else { "" })); Pending = $false }
             $done += $n
           }
         }
@@ -2705,6 +2765,7 @@ function Show-CodexStatus {
   Write-Host "  OPENAI_API_KEY: $(Format-AiSecretPreview $env:OPENAI_API_KEY)"
   Write-Host "  Cached login: $(Get-CodexLoginStatusText)"
   if ($profile) {
+    Write-Host "  Probe model: $(Get-AiProbeModel -Tool codex -Profile $profile)"
     $h = Get-AiProfileHealthCached -Tool "codex" -Profile $profile -Fresh:$Fresh -CacheOnly:(-not $Fresh)
     Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
   }
@@ -2735,6 +2796,7 @@ function Show-ClaudeStatus {
   $cprofile = Get-AiProfileByName -Tool "claude" -Name ($env:AI_CLAUDE_LABEL ?? $saved)
   if (-not $cprofile) { $cprofile = Get-AiProfileByName -Tool "claude" -Name (Get-AiDefaultProfileName -Tool "claude") }
   if ($cprofile) {
+    Write-Host "  Probe model: $(Get-AiProbeModel -Tool claude -Profile $cprofile)"
     $h = Get-AiProfileHealthCached -Tool "claude" -Profile $cprofile -Fresh:$Fresh -CacheOnly:(-not $Fresh)
     Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
   }

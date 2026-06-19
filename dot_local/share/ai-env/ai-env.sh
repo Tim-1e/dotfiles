@@ -548,6 +548,41 @@ _codex_profile_path() {
   printf '%s/%s.config.toml\n' "$home" "$profile"
 }
 
+_ai_has_fresh_flag() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --fresh|-f|--refresh|-r) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+_ai_probe_model_for() {
+  local tool="$1" profile_json="$2"
+  _ai_require_node || return 1
+  node - "$tool" "$profile_json" "$AI_SECRETS_PATH" "$AI_HOME" <<'NODE'
+const fs=require("fs");
+const [tool,profileJson,secretsPath,homeArg]=process.argv.slice(2);
+const P=JSON.parse(profileJson);
+const home=homeArg||process.env.HOME||"";
+if((P.mode||"sub")!=="api"){process.stdout.write("-");process.exit(0);}
+const expand=(x)=>!x?"":String(x).replace(/^~(?=\/|$)/,home);
+const tomlStr=(file,key)=>{if(!file||!fs.existsSync(file))return"";const re=new RegExp("^\\s*"+key.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*=\\s*\"([^\"]*)\"");for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const m=line.match(re);if(m)return m[1];}return"";};
+const unquote=(raw)=>{let v=String(raw||"").trim();if(v.startsWith("\"")){const mm=v.match(/^"((?:\\.|[^"])*)"/);if(mm){try{return JSON.parse(mm[0]);}catch{return mm[1];}}}if(v.startsWith("'")){const end=v.indexOf("'",1);if(end>0)return v.slice(1,end);}return v.replace(/\s+#.*$/,"").trim();};
+const parseSecrets=(file)=>{const s={};if(!file||!fs.existsSync(file))return s;let c="";for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const t=line.trim();if(!t||t.startsWith("#"))continue;const sec=t.match(/^\[([^\]]+)\]\s*$/);if(sec){c=sec[1].trim();s[c]=s[c]||{};continue;}if(!c)continue;const m=t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(!m)continue;s[c][m[1]]=unquote(m[2]);}return s;};
+const parseEnvFile=(file)=>{const e={};if(!file||!fs.existsSync(file))return e;for(const line of fs.readFileSync(file,"utf8").split(/\r?\n/)){const m=line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);if(!m)continue;e[m[1]]=unquote(m[2]);}return e;};
+const profileEnv=(p,key)=>p&&p.env&&typeof p.env==="object"&&p.env[key]?String(p.env[key]):"";
+const sec=(parseSecrets(secretsPath)[P.secret_id||(tool+"."+P.name)])||{};
+const legacyEnv=parseEnvFile(expand(P.linux_secret||P.secret||""));
+let model="";
+if(P.probe_model)model=String(P.probe_model);
+else if(tool==="claude")model=sec.ANTHROPIC_MODEL||legacyEnv.ANTHROPIC_MODEL||profileEnv(P,"ANTHROPIC_MODEL")||process.env.ANTHROPIC_MODEL||sec.ANTHROPIC_DEFAULT_HAIKU_MODEL||legacyEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL||profileEnv(P,"ANTHROPIC_DEFAULT_HAIKU_MODEL")||process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL||"claude-3-5-haiku-20241022";
+else{const profPath=expand((P.home||"~/.codex")+"/"+(P.codex_profile||P.profile||String(P.name||"").replace(":","-"))+".config.toml");model=tomlStr(profPath,"model")||tomlStr(expand(P.home||"~/.codex")+"/config.toml","model")||"gpt-5.4-mini";}
+process.stdout.write(model);
+NODE
+}
+
 _read_json_openai_key() {
   local file="$1"
   if command -v jq >/dev/null 2>&1; then
@@ -1056,6 +1091,7 @@ _cx_print_status() {
   echo "  CODEX_HOME: $CODEX_HOME"
   echo "  Profile: $AI_CODEX_PROFILE ($profile_file)"
   echo "  Base URL: $base_url"
+  echo "  Probe model: $(_ai_probe_model_for codex "$profile_json")"
   echo "  Cached login: $(_codex_login_status)"
   if [ "$mode" = "api" ]; then
     echo "  OPENAI_API_KEY: $(_ai_secret_preview "${OPENAI_API_KEY:-}")"
@@ -1078,20 +1114,24 @@ _cc_print_status() {
   echo "Claude Code state switched: $name"
   echo "  Run next: claude"
   echo "  Registry: $AI_REGISTRY_PATH"
+  echo "  Probe model: $(_ai_probe_model_for claude "$profile_json")"
   if [ "$mode" = "api" ]; then
     echo "  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-<unset>}"
     echo "  ANTHROPIC_API_KEY: $(_ai_secret_preview "${ANTHROPIC_API_KEY:-}")"
     echo "  ANTHROPIC_AUTH_TOKEN: $(_ai_secret_preview "${ANTHROPIC_AUTH_TOKEN:-}")"
     echo "  Secret source: $AI_SECRET_SOURCE"
+    echo "  API local check: auth=$([ -n "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}" ] && echo true || echo false); url=$([ -n "${ANTHROPIC_BASE_URL:-}" ] && echo true || echo false)"
   else
     echo "  Anthropic API env: <cleared>"
     echo "  Subscription status: local Claude login is used if present"
   fi
+  _ai_health_status_line claude "$profile_json" 0
   _cc_external_status
 }
 
 _ai_list_profiles() {
   local tool="$1" output
+  _ai_health_sync_cache "$tool"
   _ai_require_node || return 1
   output="$(node -e '
 const fs = require("fs");
@@ -1099,9 +1139,21 @@ const path = process.argv[1];
 const tool = process.argv[2];
 const saved = process.argv[3];
 const secretsPath = process.argv[4];
+const healthPath = process.argv[5];
+const ttl = Number(process.argv[6] || 300);
 const home = process.env.HOME;
+const now = Math.floor(Date.now() / 1000);
 const exists = (p) => p && fs.existsSync(p);
 const expand = (p) => !p ? "" : p.replace(/^~(?=\/|$)/, home);
+const readToml = (file, key) => {
+  if (!file || !fs.existsSync(file)) return "";
+  const re = new RegExp("^\\s*" + key.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&") + "\\s*=\\s*\"([^\"]*)\"");
+  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const match = line.match(re);
+    if (match) return match[1];
+  }
+  return "";
+};
 const parseValue = (raw) => {
   const value = String(raw || "").trim();
   if (value.startsWith("\"")) {
@@ -1137,32 +1189,51 @@ const parseSecrets = (file) => {
 };
 let registry = JSON.parse(fs.readFileSync(path, "utf8"));
 const secrets = parseSecrets(secretsPath);
+let health = {};
+try { if (fs.existsSync(healthPath)) health = JSON.parse(fs.readFileSync(healthPath, "utf8")); } catch {}
 const secretVars = tool === "codex" ? ["OPENAI_API_KEY", "CODEX_API_KEY"] : ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-console.log(["Sel", "Name", "Mode", "Ready", "Runtime", "Secret", "Env", "Description"].join("\t"));
+const healthCell = (p) => {
+  const e = health[`${tool}.${p.name || ""}`];
+  if (!e || !e.probedAt || (now - Number(e.probedAt)) >= ttl) return "⏭";
+  if (e.status === "healthy") return `🟢${e.latencyMs || 0}ms`;
+  const code = String(e.error || "").match(/HTTP\s+(\d{3})/)?.[1];
+  if (e.status === "degraded") return `🟡${code || "slow"}`;
+  if (e.status === "down") return `🔴${code || "err"}`;
+  if (e.status === "skip") return "⏭";
+  return "?";
+};
+console.log(tool === "codex"
+  ? ["Sel", "Name", "Mode", "Health", "Profile", "BaseUrl"].join("\t")
+  : ["Sel", "Name", "Mode", "Health", "BaseUrl"].join("\t"));
 for (const p of registry[tool] || []) {
   const mode = p.mode || "sub";
-  const runtime = tool === "codex" ? `${expand(p.home || "~/.codex")}/${p.codex_profile || p.profile || String(p.name || "").replace(":", "-")}.config.toml` : (p.base_url || "local subscription");
   const secretId = p.secret_id || `${tool}.${p.name || ""}`;
-  const tomlReady = mode !== "api" || secretVars.some((name) => secrets[secretId] && secrets[secretId][name]);
-  const legacy = expand(p.linux_secret || p.secret || "");
-  const legacyReady = mode !== "api" || exists(legacy);
-  const secret = mode === "api"
-    ? (tomlReady ? `${secretsPath}#${secretId}` : (legacy ? (legacyReady ? legacy : `<missing> ${legacy}`) : `<missing> ${secretsPath}#${secretId}`))
-    : "<none>";
-  const configOk = tool !== "codex" || exists(runtime);
-  const secretOk = mode !== "api" || tomlReady || legacyReady;
-  const ready = tool === "codex" && mode === "sub" && !configOk ? "ok-default" : (configOk && secretOk ? "ok" : (!configOk ? "missing-config" : "missing-secret"));
   const selected = String(p.name || "") === saved ? "*" : " ";
-  const envCount = (p.env && typeof p.env === "object") ? Object.keys(p.env).length : 0;
-  const envCell = envCount ? String(envCount) : "<none>";
-  console.log([selected, p.name || "", mode, ready, runtime, secret || "<missing>", envCell, p.description || ""].join("\t"));
+  const h = healthCell(p);
+  if (tool === "codex") {
+    const profile = p.codex_profile || p.profile || String(p.name || "").replace(":", "-");
+    const runtime = `${expand(p.home || "~/.codex")}/${profile}.config.toml`;
+    let baseUrl = readToml(runtime, "base_url") || readToml(`${expand(p.home || "~/.codex")}/config.toml`, "openai_base_url") || "built-in OpenAI/ChatGPT endpoint";
+    console.log([selected, p.name || "", mode, h, profile, baseUrl].join("\t"));
+  } else {
+    let baseUrl = "local Claude subscription login";
+    if (mode === "api") {
+      baseUrl = (secrets[secretId] && secrets[secretId].ANTHROPIC_BASE_URL) || p.base_url || "https://anyrouter.top";
+    }
+    console.log([selected, p.name || "", mode, h, baseUrl].join("\t"));
+  }
 }
-' "$AI_REGISTRY_PATH" "$tool" "$(_ai_saved_profile "$tool")" "$AI_SECRETS_PATH")" || return 1
+' "$AI_REGISTRY_PATH" "$tool" "$(_ai_saved_profile "$tool")" "$AI_SECRETS_PATH" "$AI_HEALTH_PATH" "$AI_HEALTH_TTL")" || return 1
 
   if command -v column >/dev/null 2>&1; then
     printf '%s\n' "$output" | column -t -s "$(printf '\t')"
   else
     printf '%s\n' "$output"
+  fi
+  if [ "$tool" = "codex" ]; then
+    echo "  (Health = cached snapshot, ⏭=stale/unprobed; run 'cx health' to refresh)"
+  else
+    echo "  (Health = cached snapshot, ⏭=stale/unprobed; run 'cc health' to refresh)"
   fi
 }
 
@@ -1174,13 +1245,13 @@ cx() {
 cx - switch Codex state for this shell
 
 Usage:
-  cx                 Cycle through enabled Codex profiles
+  cx                 Auto-select a cached healthy Codex profile (default fallback)
   cx sub             Use a named subscription profile
   cx sub:work        Use another subscription profile, if registered
   cx api             Use the default API profile
   cx api:docker      Use a named API profile
-  cx list            List registry profiles
-  cx status          Print current state
+  cx list            List registry profiles and cached health
+  cx status          Print current state; --fresh/--refresh re-probes selected profile
   cx stats           Summarize local rollout token usage
   cx add-api NAME    Register a Codex API profile that shares ~/.codex by default
                      Options: --base-url URL --env-key NAME --provider-name NAME
@@ -1190,8 +1261,11 @@ Usage:
   cx remove NAME     Remove a Codex profile registration
   cx probe-model NAME [MODEL]  Set/clear health-probe model override
   cx default [NAME]  Show/set the default (primary) profile
-  cx health          Probe & report profile health; --fresh re-probes
+  cx edit            Open the profile registry (profiles.json) in EDITOR
+  cx health          Probe & report profile health table; --fresh/--refresh re-probes
+  cx doctor          Run codex doctor full diagnostic (slow, on-demand)
   cx health-clear    Clear the health probe cache
+  cx next            Cycle to the next enabled profile
   cx help            Show this help
 
 Config:
@@ -1201,6 +1275,7 @@ Config:
 
 After switching, run Codex separately: codex
 Add commands only write profile metadata and Codex config. Put real tokens in secrets.toml.
+Without probe_model, Codex probes use runtime/global config.toml model, then a cheap fallback.
 Legacy ~/.ai-secrets/*.env files are still accepted as a fallback.
 EOF
       return
@@ -1211,7 +1286,7 @@ EOF
       return
       ;;
     status)
-      _hr=0; case "$*" in *--refresh*|*-r*) _hr=1;; esac
+      _hr=0; _ai_has_fresh_flag "$@" && _hr=1
       echo "Codex state:"
       echo "  Registry: $AI_REGISTRY_PATH"
       echo "  State: $AI_STATE_PATH"
@@ -1221,7 +1296,10 @@ EOF
       echo "  CODEX_HOME: ${CODEX_HOME:-$HOME/.codex}"
       echo "  OPENAI_API_KEY: $(_ai_secret_preview "${OPENAI_API_KEY:-}")"
       echo "  Cached login: $(_codex_login_status)"
-      profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && _ai_health_status_line codex "$profile_json" "$_hr"
+      profile_json="$(_ai_profile_json codex "${AI_CODEX_LABEL:-$(_ai_saved_profile codex)}")" && {
+        echo "  Probe model: $(_ai_probe_model_for codex "$profile_json")"
+        _ai_health_status_line codex "$profile_json" "$_hr"
+      }
       return
       ;;
     edit)
@@ -1250,7 +1328,7 @@ EOF
       ;;
     health)
       shift
-      _hf=0; case "$*" in *--fresh*|*-f*) _hf=1;; esac
+      _hf=0; _ai_has_fresh_flag "$@" && _hf=1
       _ai_health_show codex "$_hf"
       return
       ;;
@@ -1291,13 +1369,13 @@ cc() {
 cc - switch Claude Code state for this shell
 
 Usage:
-  cc                 Cycle through enabled Claude Code profiles
+  cc                 Auto-select a cached healthy Claude Code profile (default fallback)
   cc sub             Clear Anthropic API env and use local Claude subscription login
   cc sub:work        Use another subscription profile, if registered
   cc api             Use the default API profile
   cc api:docker      Use a named API profile
-  cc list            List registry profiles
-  cc status          Print current state
+  cc list            List registry profiles and cached health
+  cc status          Print current state; --fresh/--refresh re-probes selected profile
   cc add-api NAME    Register a Claude Code API profile
                      Options: --base-url URL --env-key NAME --env KEY=VALUE (repeatable)
                      Prompts for missing base-url and the secret in a terminal.
@@ -1306,8 +1384,10 @@ Usage:
   cc remove NAME     Remove a Claude Code profile registration
   cc probe-model NAME [MODEL]  Set/clear health-probe model override
   cc default [NAME]  Show/set the default (primary) profile
-  cc health          Probe & report profile health; --fresh re-probes
+  cc edit            Open the profile registry (profiles.json) in EDITOR
+  cc health          Probe & report profile health table; --fresh/--refresh re-probes
   cc health-clear    Clear the health probe cache
+  cc next            Cycle to the next enabled profile
   cc help            Show this help
 
 Config:
@@ -1317,6 +1397,7 @@ Config:
 
 After switching, run Claude Code separately: claude
 Add commands only write profile metadata. Put real tokens in secrets.toml.
+Without probe_model, Claude probes use ANTHROPIC_MODEL, ANTHROPIC_DEFAULT_HAIKU_MODEL, then a cheap fallback.
 Legacy ~/.ai-secrets/*.env files are still accepted as a fallback.
 EOF
       return
@@ -1327,7 +1408,7 @@ EOF
       return
       ;;
     status)
-      _hr=0; case "$*" in *--refresh*|*-r*) _hr=1;; esac
+      _hr=0; _ai_has_fresh_flag "$@" && _hr=1
       echo "Claude Code state:"
       echo "  Registry: $AI_REGISTRY_PATH"
       echo "  State: $AI_STATE_PATH"
@@ -1336,7 +1417,10 @@ EOF
       echo "  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-<unset>}"
       echo "  ANTHROPIC_API_KEY: $(_ai_secret_preview "${ANTHROPIC_API_KEY:-}")"
       echo "  ANTHROPIC_AUTH_TOKEN: $(_ai_secret_preview "${ANTHROPIC_AUTH_TOKEN:-}")"
-      profile_json="$(_ai_profile_json claude "${AI_CLAUDE_LABEL:-$(_ai_saved_profile claude)}")" && _ai_health_status_line claude "$profile_json" "$_hr"
+      profile_json="$(_ai_profile_json claude "${AI_CLAUDE_LABEL:-$(_ai_saved_profile claude)}")" && {
+        echo "  Probe model: $(_ai_probe_model_for claude "$profile_json")"
+        _ai_health_status_line claude "$profile_json" "$_hr"
+      }
       _cc_external_status
       return
       ;;
@@ -1361,7 +1445,7 @@ EOF
       ;;
     health)
       shift
-      _hf=0; case "$*" in *--fresh*|*-f*) _hf=1;; esac
+      _hf=0; _ai_has_fresh_flag "$@" && _hf=1
       _ai_health_show claude "$_hf"
       return
       ;;
@@ -1486,10 +1570,10 @@ let urls=[];
 if(tool==="claude"){const apiBase=/\/v1$/.test(baseOrigin)?baseOrigin.replace(/\/v1$/,""):baseOrigin;urls.push(apiBase+"/v1/messages");}
 else{const hasVer=/\/v\d+$/.test(baseOrigin);const apiBase=hasVer?baseOrigin:baseOrigin+"/v1";urls.push(apiBase+"/responses");urls.push(apiBase+"/chat/completions");}
 const bodyFor=(u)=>u.endsWith("/responses")?JSON.stringify({model:probeModel,input:".",max_output_tokens:1}):JSON.stringify({model:probeModel,max_tokens:1,messages:[{role:"user",content:"."}]});
-const req=(u)=>new Promise((resolve)=>{const t0=Date.now();let done=false;const fin=(r)=>{if(!done){done=true;r.latencyMs=Date.now()-t0;resolve(r);}};const obj=new URL(u);const lib=obj.protocol==="http:"?http:https;const body=bodyFor(u);const r=lib.request(obj,{method:"POST",headers:{...headers,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)},timeout:20000},(res)=>{let d="";res.on("data",(c)=>d+=c);res.on("end",()=>{const detail=d.replace(/\s+/g," ").trim().slice(0,240);fin({ok:res.statusCode>=200&&res.statusCode<300,code:res.statusCode,body:d,err:detail?"HTTP "+res.statusCode+" "+detail:"HTTP "+res.statusCode});});});r.on("timeout",()=>{r.destroy();fin({ok:false,code:0,body:"",err:"timeout"});});r.on("error",(e)=>fin({ok:false,code:0,body:"",err:probeErr(e.message)}));r.write(body);r.end();});const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported/.test(String(x||"").toLowerCase());const compactErr=(x)=>modelUnsupported(x)?"probe model unsupported; set probe_model":String(x||"");
-(async()=>{let lastErr=null,anyTransient=false;for(const u of urls){const r=await req(u);if(r.ok){let valid=true;try{const j=JSON.parse(r.body);if(u.endsWith("/messages"))valid=(Array.isArray(j.content)&&j.content.length>0)||j.type==="message";else if(u.endsWith("/responses"))valid=(Array.isArray(j.output)&&j.output.length>0)||j.output_text||j.status==="completed";else valid=Array.isArray(j.choices)&&j.choices.length>0;}catch{valid=false;}if(valid){const st=r.latencyMs>degradedMs?"degraded":"healthy";return out({status:st,latencyMs:r.latencyMs,method:"generation",error:null});}lastErr="200 but no generated content";}else{lastErr=r.err||(r.code?("HTTP "+r.code):"request failed");if(modelUnsupported(lastErr))return out({status:"degraded",latencyMs:r.latencyMs||0,method:"none",error:compactErr(lastErr)});if(r.code===429||(r.code>=500&&r.code<600))anyTransient=true;}}
-if(anyTransient)return out({status:"degraded",latencyMs:0,method:"none",error:compactErr(lastErr)+(anyTransient?" (transient)":"")});
-return out({status:"down",latencyMs:0,method:"none",error:compactErr(lastErr)});
+const req=(u)=>new Promise((resolve)=>{const t0=Date.now();let done=false;const fin=(r)=>{if(!done){done=true;r.latencyMs=Date.now()-t0;resolve(r);}};const obj=new URL(u);const lib=obj.protocol==="http:"?http:https;const body=bodyFor(u);const r=lib.request(obj,{method:"POST",headers:{...headers,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)},timeout:20000},(res)=>{let d="";res.on("data",(c)=>d+=c);res.on("end",()=>{const detail=d.replace(/\s+/g," ").trim().slice(0,240);fin({ok:res.statusCode>=200&&res.statusCode<300,code:res.statusCode,body:d,err:detail?"HTTP "+res.statusCode+" "+detail:"HTTP "+res.statusCode});});});r.on("timeout",()=>{r.destroy();fin({ok:false,code:0,body:"",err:"timeout"});});r.on("error",(e)=>fin({ok:false,code:0,body:"",err:probeErr(e.message)}));r.write(body);r.end();});const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(String(x||"").toLowerCase());
+(async()=>{let lastErr=null,anyTransient=false;for(const u of urls){const r=await req(u);if(r.ok){let valid=true;try{const j=JSON.parse(r.body);if(u.endsWith("/messages"))valid=(Array.isArray(j.content)&&j.content.length>0)||j.type==="message";else if(u.endsWith("/responses"))valid=(Array.isArray(j.output)&&j.output.length>0)||j.output_text||j.status==="completed";else valid=Array.isArray(j.choices)&&j.choices.length>0;}catch{valid=false;}if(valid){const st=r.latencyMs>degradedMs?"degraded":"healthy";return out({status:st,latencyMs:r.latencyMs,method:"generation",error:null});}lastErr="200 but no generated content";}else{lastErr=r.err||(r.code?("HTTP "+r.code):"request failed");if(modelUnsupported(lastErr))return out({status:"degraded",latencyMs:r.latencyMs||0,method:"none",error:String(lastErr)});if(r.code===429||(r.code>=500&&r.code<600))anyTransient=true;}}
+if(anyTransient)return out({status:"degraded",latencyMs:0,method:"none",error:String(lastErr)+(anyTransient?" (transient)":"")});
+return out({status:"down",latencyMs:0,method:"none",error:String(lastErr)});
 })();
 ' "$tool" "$profile_json" "$AI_SECRETS_PATH" "$CLAUDE_ROUTER_BASE_URL"
 }
@@ -1559,6 +1643,34 @@ _ai_health_cell_cached() {
   else
     printf '⏭'
   fi
+}
+
+_ai_health_display_error() {
+  local error="${1:-}"
+  [ -n "$error" ] || return 0
+  node -e '
+const text=String(process.argv[1]||"").replace(/\s+/g," ").trim();
+const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(String(x||"").toLowerCase());
+const compactHttp=(s)=>{
+  s=String(s||"").replace(/\s+/g," ").trim();
+  const m=s.match(/^(HTTP \d{3})(?:\s+(.+))?$/);
+  if(!m)return s;
+  const code=m[1], body=m[2]||"";
+  if(!body)return code;
+  try{const j=JSON.parse(body);const msg=j?.error?.message||j?.message||j?.error||j?.type||"";if(msg)return code+" "+String(msg).replace(/\s+/g," ").trim();}catch{}
+  const mm=body.match(/"message"\s*:\s*"([^"]+)"/)||body.match(/message=([^,;}]+)/);
+  if(mm)return code+" "+mm[1].replace(/\s+/g," ").trim();
+  return s;
+};
+const short=(s)=>modelUnsupported(s)?"probe model unsupported; set probe_model":compactHttp(s);
+const one=text.match(/^(POST\s+\/\S+\s+)(.+)$/);
+const dual=text.match(/^(POST\s+\/\S+\s+->\s+)(.+?)(;\s+\/\S+\s+->\s+)(.+)$/);
+let out=text;
+if(dual)out=dual[1]+short(dual[2])+dual[3]+short(dual[4]);
+else if(one)out=one[1]+short(one[2]);
+else out=short(text);
+process.stdout.write(out);
+' "$error"
 }
 
 _ai_healthy_profile() {
@@ -1656,7 +1768,11 @@ _ai_health_show() {
 # $3=1 forces a live probe (status --refresh); otherwise cache-only (instant).
 _ai_health_status_line() {
   local tool="$1" profile_json="$2" fresh="${3:-0}" h cell err
-  h="$(_ai_health_cached "$tool" "$profile_json" "$fresh" 1)"
+  if [ "$fresh" = "1" ]; then
+    h="$(_ai_health_cached "$tool" "$profile_json" 1 0)"
+  else
+    h="$(_ai_health_cached "$tool" "$profile_json" 0 1)"
+  fi
   cell="$(_ai_health_cell "$h")"
   err="$(_ai_health_field "$h" error)"
   [ -n "$err" ] && err="  $err"
