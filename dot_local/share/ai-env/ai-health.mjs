@@ -101,6 +101,7 @@ function buildPlan(p) {
     headers = { 'anthropic-version': '2023-06-01' };
     if (at) headers.Authorization = 'Bearer ' + at;
     if (ak) headers['x-api-key'] = ak;
+    if (/\[1m\]/i.test(probeModel)) headers['anthropic-beta'] = 'context-1m-2025-08-07';
     headers['User-Agent'] = p.probe_ua || 'claude-cli/1.0.119 (external, cli)';
     if (!at && !ak) return { early: { status: 'down', latencyMs: 0, method: null, error: 'missing credentials' } };
   } else {

@@ -59,6 +59,7 @@ try {
   cc add-api hcn   --base-url https://h.test | Out-Null
   cc add-api cyc-a --base-url https://h.test | Out-Null
   cc add-api cyc-b --base-url https://h.test | Out-Null
+  cc add-api h1m --base-url https://h.test | Out-Null
 
   Write-Host "[1] Format-AiHealthCell status icons"
   Assert-Match "healthy cell" (Format-AiHealthCell ([pscustomobject]@{ Status = "healthy"; LatencyMs = 120; Error = $null })) "🟢120ms"
@@ -86,6 +87,13 @@ try {
   cc add-api envmodel --base-url https://h.test --env ANTHROPIC_DEFAULT_HAIKU_MODEL=env-haiku | Out-Null
   $pm4 = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name envmodel)).ProbeModel
   Assert-Eq "probe_model clear -> profile haiku env" $pm4 "env-haiku"
+  cc probe-model h1m 'claude-opus-4-8[1m]' | Out-Null
+  $h1mHeaders = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name h1m)).Headers
+  Assert-Eq "1m probe adds beta header" $h1mHeaders["anthropic-beta"] "context-1m-2025-08-07"
+  cc probe-model h1m 'claude-opus-4-8' | Out-Null
+  $h1mPlainHeaders = (Get-AiProfileProbeTarget -Tool claude -Profile (Get-AiProfileByName -Tool claude -Name h1m)).Headers
+  if ($h1mPlainHeaders.ContainsKey("anthropic-beta")) { throw "plain probe_model should not add anthropic-beta" }
+  Write-Host "  ok: plain probe_model omits beta header"
 
   Write-Host "[3] default show / set"
   cc default hbad | Out-Null

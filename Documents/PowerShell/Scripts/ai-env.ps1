@@ -1278,9 +1278,11 @@ function Get-AiProfileProbeTarget {
     if (-not $authToken) { $authToken = [Environment]::GetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "User") }
     if (-not $apiKey) { $apiKey = [Environment]::GetEnvironmentVariable("ANTHROPIC_API_KEY", "User") }
 
+    $probeModel = Get-AiProbeModel -Tool $Tool -Profile $Profile
     $headers = @{ "anthropic-version" = "2023-06-01" }
     if ($authToken) { $headers["Authorization"] = "Bearer $authToken" }
     if ($apiKey) { $headers["x-api-key"] = $apiKey }
+    if ($probeModel -match '\[1m\]') { $headers["anthropic-beta"] = "context-1m-2025-08-07" }
     # Some relays gate on User-Agent (e.g. AixHan rejects unknown clients with a
     # 400 "Client not allowed ..."). Identify as the real Claude Code CLI so the
     # probe sees what an actual session sees. Override per-profile via `probe_ua`.
@@ -1290,7 +1292,7 @@ function Get-AiProfileProbeTarget {
     $result.Headers = $headers
     $result.SecretOk = [bool]($authToken -or $apiKey)
     $result.SecretLabel = if ($result.SecretOk) { "$script:AiSecretsPath#$secretId" } else { "<none>" }
-    $result.ProbeModel = Get-AiProbeModel -Tool $Tool -Profile $Profile
+    $result.ProbeModel = $probeModel
     return $result
   }
 
