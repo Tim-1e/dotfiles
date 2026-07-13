@@ -6,7 +6,9 @@ $env:VIRTUAL_ENV_DISABLE_PROMPT = "1"
 
 Import-Module PSReadLine -ErrorAction SilentlyContinue
 
-if (-not $env:CODEX_THREAD_ID) {
+$isPaseoTerminal = [bool]($env:PASEO_TERMINAL_ID -or $env:PASEO_TERMINAL)
+
+if (-not $env:CODEX_THREAD_ID -and -not $isPaseoTerminal) {
   Import-Module Terminal-Icons -ErrorAction SilentlyContinue
 }
 
@@ -63,8 +65,9 @@ function python {
   Write-Host "Run 'act' first." -ForegroundColor Yellow
 }
 
-if (-not $env:CODEX_THREAD_ID -and (Get-Command oh-my-posh -ErrorAction SilentlyContinue)) {
-  $themePath = Join-Path $HOME "Documents\PowerShell\my_theme.json"
+if (($isPaseoTerminal -or -not $env:CODEX_THREAD_ID) -and (Get-Command oh-my-posh -ErrorAction SilentlyContinue)) {
+  $themeFile = if ($isPaseoTerminal) { "my_theme_paseo.json" } else { "my_theme.json" }
+  $themePath = Join-Path $HOME "Documents\PowerShell\$themeFile"
   if (Test-Path -LiteralPath $themePath) {
     oh-my-posh init pwsh --config $themePath | Invoke-Expression
   } else {
