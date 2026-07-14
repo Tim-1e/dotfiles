@@ -15,6 +15,7 @@ trap 'status=$?; if [ "$status" -ne 0 ]; then echo "AI env shell smoke failed wi
 
 mkdir -p "$tmp_home/.local/share/ai-env" "$tmp_home/.ai-env" "$tmp_home/.ai-secrets" "$tmp_home/.codex" "$debug_dir"
 cp "$SOURCE_DIR/dot_local/share/ai-env/ai-env.sh" "$tmp_home/.local/share/ai-env/ai-env.sh"
+cp "$SOURCE_DIR/dot_local/share/ai-env/ai-health.mjs" "$tmp_home/.local/share/ai-env/ai-health.mjs"
 cp "$SOURCE_DIR/dot_ai-env/create_profiles.json" "$tmp_home/.ai-env/profiles.json"
 cp "$SOURCE_DIR/dot_codex/create_sub.config.toml" "$tmp_home/.codex/sub.config.toml"
 cp "$SOURCE_DIR/dot_codex/create_api.config.toml" "$tmp_home/.codex/api.config.toml"
@@ -58,6 +59,18 @@ assert_contains() {
     echo "missing expected text '$needle' in $file" >&2
     return 1
   }
+}
+
+assert_display_width() {
+  local file="$1" max="$2" prefix="${3:-}"
+  node -e '
+const fs=require("fs"),max=Number(process.argv[2]),prefix=process.argv[3]||"";
+const width=(s)=>{let w=0;for(const ch of s)w+=(ch.codePointAt(0)>=0x2e80&&ch.codePointAt(0)<=0xa4cf)?2:1;return w;};
+for(const line of fs.readFileSync(process.argv[1],"utf8").split(/\r?\n/)){
+  if(prefix&&!line.startsWith(prefix))continue;
+  if(width(line)>max)throw new Error(`line width ${width(line)} exceeds ${max}: ${line}`);
+}
+' "$file" "$max" "$prefix"
 }
 
 (
@@ -156,6 +169,7 @@ assert_contains() {
       hbad)  printf '%s' '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 401"}';;
       hslow) printf '%s' '{"status":"degraded","latencyMs":9999,"method":"generation","error":"HTTP 429 (transient)"}';;
       hcn)   printf '%s' '{"status":"degraded","latencyMs":10,"method":"none","error":"POST /v1/messages HTTP 400 {\"type\":\"error\",\"error\":{\"message\":\"[1211][模型不存在，请检查模型代码。]\"}}"}';;
+      hescaped) printf '%s' '{"status":"degraded","latencyMs":10,"method":"none","error":"POST /v1/messages HTTP 500 {\"error\":{\"message\":\"\\u539f\\u56e0\\u8d85\\u957f\\uff1a\\u8fd9\\u662f\\u4e00\\u6bb5\\u4e2d\\u6587\\u9519\\u8bef\\u539f\\u56e0\"}} trailing"}';;
       *)     printf '%s' '{"status":"down","latencyMs":0,"method":"none","error":"HTTP 404"}';;
     esac
   }
@@ -163,6 +177,7 @@ assert_contains() {
   cc add-api hbad  --base-url https://h.test >/dev/null 2>&1
   cc add-api hslow --base-url https://h.test >/dev/null 2>&1
   cc add-api hcn   --base-url https://h.test >/dev/null 2>&1
+  cc add-api hescaped --base-url https://h.test >/dev/null 2>&1
   cat >>"$AI_SECRETS_PATH" <<'EOF'
 
 [claude.hgood]
@@ -202,8 +217,48 @@ EOF
   _ai_save_profile claude hcn
   unset AI_CLAUDE_LABEL
   cc status --fresh >"$debug_dir/cc-status-hcn-fresh.out" 2>&1
-  assert_contains "模型不存在" "$debug_dir/cc-status-hcn-fresh.out"
+  assert_contains "probe model unsupported; set probe_model" "$debug_dir/cc-status-hcn-fresh.out"
   assert_contains "Probe model:" "$debug_dir/cc-status-hcn-fresh.out"
+
+  escaped_health_note="$(_ai_health_display_error 'POST /v1/messages HTTP 500 {"error":{"message":"\u539f\u56e0\u8d85\u957f\uff1a\u8fd9\u662f\u4e00\u6bb5\u4e2d\u6587\u9519\u8bef\u539f\u56e0"}} trailing')"
+  case "$escaped_health_note" in
+    *"原因超长"*) : ;;
+    *) echo "escaped Chinese health note was not decoded: $escaped_health_note" >&2; exit 1 ;;
+  esac
+  case "$escaped_health_note" in
+    *'\u'[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*) echo "Unicode escape leaked: $escaped_health_note" >&2; exit 1 ;;
+  esac
+  control_health_note="$(_ai_health_display_error $'HTTP 500 \033[2J原因超长')"
+  case "$control_health_note" in
+    *$'\033'*) echo "ESC control character leaked: $control_health_note" >&2; exit 1 ;;
+    *"原因超长"*) : ;;
+    *) echo "control sanitization damaged Chinese detail: $control_health_note" >&2; exit 1 ;;
+  esac
+  empty_health_note="$(_ai_health_display_error '' 5 '  Health: OK')"
+  [ "${#empty_health_note}" -le 5 ] || { echo "empty health detail bypassed width cap: $empty_health_note" >&2; exit 1; }
+
+  _ai_save_profile claude hescaped
+  unset AI_CLAUDE_LABEL
+  COLUMNS=80 cc status --fresh >"$debug_dir/cc-status-hescaped-fresh.out" 2>&1
+  assert_contains "原因超长" "$debug_dir/cc-status-hescaped-fresh.out"
+  if grep -Eq '\\u[0-9a-fA-F]{4}' "$debug_dir/cc-status-hescaped-fresh.out"; then
+    echo "status leaked a Unicode escape" >&2; exit 1
+  fi
+  assert_display_width "$debug_dir/cc-status-hescaped-fresh.out" 80 "  Health:"
+
+  bounded_registry="$debug_dir/bounded-profiles.json"
+  bounded_health="$debug_dir/bounded-health.json"
+  printf '%s\n' '{"schema":1,"defaults":{"claude":"hescaped"},"codex":[],"claude":[{"name":"hescaped","aliases":[],"mode":"api","base_url":"https://h.test","secret_id":"claude.hescaped"}]}' >"$bounded_registry"
+  node -e 'const fs=require("fs");const p=process.argv[1],error="HTTP 500 \u001b[2J"+process.argv[2];fs.writeFileSync(p,JSON.stringify({"claude.hescaped":{status:"degraded",latencyMs:10,method:"none",error,probedAt:Math.floor(Date.now()/1000)}},null,2)+"\n")' "$bounded_health" '\u539f\u56e0\u8d85\u957f\uff1a\u8fd9\u662f\u4e00\u6bb5\u4e2d\u6587\u9519\u8bef\u539f\u56e0'
+  AI_REGISTRY_PATH="$bounded_registry" AI_HEALTH_PATH="$bounded_health" AI_HEALTH_COLUMNS=80 node "$tmp_home/.local/share/ai-env/ai-health.mjs" claude >"$debug_dir/cc-health-bounded.out" 2>&1
+  assert_contains "原因超" "$debug_dir/cc-health-bounded.out"
+  if grep -Eq '\\u[0-9a-fA-F]{4}' "$debug_dir/cc-health-bounded.out"; then
+    echo "health table leaked a Unicode escape" >&2; exit 1
+  fi
+  if grep -q $'\033' "$debug_dir/cc-health-bounded.out"; then
+    echo "health table leaked an ESC control character" >&2; exit 1
+  fi
+  assert_display_width "$debug_dir/cc-health-bounded.out" 80
   _ai_save_profile claude api:docker
   cc api:docker >/dev/null 2>&1
   cc api:docker >"$debug_dir/cc-switch-api-docker.out" 2>&1

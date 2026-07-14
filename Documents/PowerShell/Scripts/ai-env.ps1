@@ -1412,6 +1412,12 @@ function Invoke-AiProbeRequest {
       $r.Code = [int]$_.Exception.Response.StatusCode
       $bodyText = [string]$_.ErrorDetails.Message
       if ($bodyText) {
+        try {
+          $bodyJson = $bodyText | ConvertFrom-Json -ErrorAction Stop
+          $message = if ($bodyJson.error -and $bodyJson.error.message) { [string]$bodyJson.error.message } elseif ($bodyJson.message) { [string]$bodyJson.message } else { $null }
+          if ($message) { $bodyText = $message }
+        } catch { }
+        $bodyText = ConvertFrom-AiPrintableUnicodeEscapes $bodyText
         $bodyText = ($bodyText -replace "\s+", " ").Trim()
         if ($bodyText.Length -gt 240) { $bodyText = $bodyText.Substring(0, 240) }
         $r.Detail = "HTTP $($r.Code) $bodyText"
@@ -1441,6 +1447,95 @@ function Test-AiProbeBody {
   if (-not $valid -and -not $Req.Detail) { $Req.Detail = "200 but no generated content" }
 }
 
+$script:AiHealthMaxOutputWidth = 120
+
+function ConvertFrom-AiPrintableUnicodeEscapes {
+  param([AllowNull()][string]$Text)
+  if (-not $Text) { return "" }
+  $decoded = [regex]::Replace($Text, '\\u([0-9a-fA-F]{4})', {
+      param($match)
+      $code = [Convert]::ToInt32($match.Groups[1].Value, 16)
+      if ($code -lt 0x20 -or ($code -ge 0x7f -and $code -lt 0xa0)) { return "?" }
+      return [char]$code
+    })
+  return [regex]::Replace($decoded, '[\x00-\x1f\x7f-\x9f]', '?')
+}
+
+function Get-AiFallbackDisplayWidth {
+  param([AllowNull()][string]$Text)
+  if (-not $Text) { return 0 }
+  $width = 0
+  for ($i = 0; $i -lt $Text.Length; $i++) {
+    $code = if ([char]::IsHighSurrogate($Text[$i]) -and ($i + 1) -lt $Text.Length -and [char]::IsLowSurrogate($Text[$i + 1])) {
+      $value = [char]::ConvertToUtf32($Text[$i], $Text[$i + 1])
+      $i += 1
+      $value
+    } else { [int]$Text[$i] }
+    if ($code -ge 0xd800 -and $code -le 0xdfff) {
+      $width += 1
+      continue
+    }
+    $category = [Globalization.CharUnicodeInfo]::GetUnicodeCategory([char]::ConvertFromUtf32($code), 0)
+    if ($category -in @(
+        [Globalization.UnicodeCategory]::Control,
+        [Globalization.UnicodeCategory]::Format,
+        [Globalization.UnicodeCategory]::NonSpacingMark,
+        [Globalization.UnicodeCategory]::EnclosingMark
+      )) { continue }
+    $isWide =
+      ($code -ge 0x1100 -and $code -le 0x115f) -or $code -eq 0x2329 -or $code -eq 0x232a -or
+      ($code -ge 0x2e80 -and $code -le 0xa4cf) -or ($code -ge 0xac00 -and $code -le 0xd7a3) -or
+      ($code -ge 0xf900 -and $code -le 0xfaff) -or ($code -ge 0xfe10 -and $code -le 0xfe19) -or
+      ($code -ge 0xfe30 -and $code -le 0xfe6f) -or ($code -ge 0xff00 -and $code -le 0xff60) -or
+      ($code -ge 0xffe0 -and $code -le 0xffe6) -or ($code -ge 0x1f1e6 -and $code -le 0x1f1ff) -or
+      ($code -ge 0x1f300 -and $code -le 0x1faff)
+    $width += if ($isWide) { 2 } else { 1 }
+  }
+  return $width
+}
+
+function Get-AiDisplayWidth {
+  param([AllowNull()][string]$Text)
+  if (-not $Text) { return 0 }
+  try { return [int]$Host.UI.RawUI.LengthInBufferCells($Text) } catch { return Get-AiFallbackDisplayWidth $Text }
+}
+
+function Limit-AiDisplayText {
+  param(
+    [AllowNull()][string]$Text,
+    [int]$MaxWidth
+  )
+  if (-not $Text -or $MaxWidth -le 0) { return "" }
+  if ((Get-AiDisplayWidth $Text) -le $MaxWidth) { return $Text }
+  $suffix = if ($MaxWidth -gt 3) { "..." } else { "" }
+  $limit = [Math]::Max(0, $MaxWidth - (Get-AiDisplayWidth $suffix))
+  $result = [System.Text.StringBuilder]::new()
+  $width = 0
+  $elements = [System.Globalization.StringInfo]::GetTextElementEnumerator($Text)
+  while ($elements.MoveNext()) {
+    $element = $elements.GetTextElement()
+    $elementWidth = Get-AiDisplayWidth $element
+    if (($width + $elementWidth) -gt $limit) { break }
+    [void]$result.Append($element)
+    $width += $elementWidth
+  }
+  return $result.ToString() + $suffix
+}
+
+function Get-AiHealthOutputWidth {
+  $width = $script:AiHealthMaxOutputWidth
+  $configured = 0
+  if ([int]::TryParse($env:AI_HEALTH_COLUMNS, [ref]$configured) -and $configured -gt 0) {
+    return [Math]::Min($width, $configured)
+  }
+  if (-not [Console]::IsOutputRedirected) {
+    try {
+      if ([Console]::WindowWidth -gt 0) { $width = [Math]::Min($width, [Console]::WindowWidth) }
+    } catch { }
+  }
+  return [Math]::Max(1, $width)
+}
+
 # Resolve a final health verdict from per-candidate results (a hashtable keyed
 # by candidate Label -> request object from Invoke-AiProbeRequest). Instant.
 # Collapse a verbose probe exception into a short, scannable Note. HTTP codes
@@ -1464,14 +1559,14 @@ function ConvertTo-AiProbeError {
 function Test-AiProbeModelUnsupported {
   param([string]$Detail)
   if (-not $Detail) { return $false }
-  $l = $Detail.ToLowerInvariant()
+  $l = (ConvertFrom-AiPrintableUnicodeEscapes $Detail).ToLowerInvariant()
   return ($l -match "no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码")
 }
 
 function ConvertTo-AiHealthDisplayError {
   param([string]$Detail)
   if (-not $Detail) { return "" }
-  $text = ($Detail -replace "\s+", " ").Trim()
+  $text = ((ConvertFrom-AiPrintableUnicodeEscapes $Detail) -replace "\s+", " ").Trim()
   function ShortProbeDetail([string]$Item) {
     $itemText = ($Item -replace "\s+", " ").Trim()
     if (Test-AiProbeModelUnsupported $itemText) {
@@ -2113,7 +2208,7 @@ function Write-CodexSwitchStatus {
   # NOT run here: it does live network/websocket checks that stall the switch.
   # Use `cx doctor` for the full diagnostic on demand.
   $h = Get-AiProfileHealthCached -Tool "codex" -Profile $Profile -CacheOnly
-  Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
+  Write-Host (Format-AiHealthStatusLine $h)
 }
 
 function Write-ClaudeSwitchStatus {
@@ -2139,7 +2234,7 @@ function Write-ClaudeSwitchStatus {
   }
 
   $h = Get-AiProfileHealthCached -Tool "claude" -Profile $Profile -CacheOnly
-  Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
+  Write-Host (Format-AiHealthStatusLine $h)
   Write-ClaudeExternalStatus
 }
 
@@ -2249,6 +2344,13 @@ function Format-AiHealthCell {
     "skip"     { "⏭" }
     default    { "?" }
   }
+}
+
+function Format-AiHealthStatusLine {
+  param([AllowNull()]$H)
+  $line = "  Health: " + (Format-AiHealthCell $H)
+  if ($H -and $H.Error) { $line += "  " + (ConvertTo-AiHealthDisplayError ([string]$H.Error)) }
+  return Limit-AiDisplayText $line (Get-AiHealthOutputWidth)
 }
 
 function Test-AiFreshFlag {
@@ -2560,20 +2662,24 @@ function Show-AiHealth {
     }
   }
 
-  # Build the table rows from the live $display state (final summary).
-  $renderRows = {
+  $outputWidth = Get-AiHealthOutputWidth
+  $buildLines = {
+    param([int]$Tick = 0)
+    $dots = ($Tick % 7) + 1
+    $lines = @()
+    $lines += Limit-AiDisplayText ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f "Sel", "Name", "Health", "Method", "Note") $outputWidth
+    $lines += Limit-AiDisplayText ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f "---", "----", "------", "------", "----") $outputWidth
     foreach ($p in $profiles) {
       $n = Get-AiProfileName -Profile $p
       $d = $display[$n]
       if (-not $d) { $d = @{ Health = "?"; Method = "-"; Note = ""; Pending = $false } }
-      [pscustomobject]@{
-        Sel    = if ($n -eq $saved) { "*" } else { " " }
-        Name   = $n
-        Health = $d.Health
-        Method = $d.Method
-        Note   = $d.Note
-      }
+      if ($d.Pending) { $cell = "⏳"; $method = "-"; $note = "waiting ⏳" + ("." * $dots) }
+      else { $cell = $d.Health; $method = $d.Method; $note = $d.Note }
+      $sel = if ($n -eq $saved) { "*" } else { " " }
+      $row = "{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f $sel, $n, $cell, $method, $note
+      $lines += Limit-AiDisplayText $row $outputWidth
     }
+    $lines
   }
 
   # Probe block: builtins only (no engine functions in the child runsape). Body
@@ -2600,7 +2706,27 @@ function Show-AiHealth {
     } catch {
       $sw.Stop()
       $r.LatencyMs = [int]$sw.ElapsedMilliseconds
-      if ($_.Exception.Response) { $r.Code = [int]$_.Exception.Response.StatusCode; $r.Detail = "HTTP " + $r.Code }
+      if ($_.Exception.Response) {
+        $r.Code = [int]$_.Exception.Response.StatusCode
+        $bodyText = [string]$_.ErrorDetails.Message
+        if ($bodyText) {
+          try {
+            $bodyJson = $bodyText | ConvertFrom-Json -ErrorAction Stop
+            $message = if ($bodyJson.error -and $bodyJson.error.message) { [string]$bodyJson.error.message } elseif ($bodyJson.message) { [string]$bodyJson.message } else { $null }
+            if ($message) { $bodyText = $message }
+          } catch { }
+          $bodyText = [regex]::Replace($bodyText, '\\u([0-9a-fA-F]{4})', {
+              param($match)
+              $code = [Convert]::ToInt32($match.Groups[1].Value, 16)
+              if ($code -lt 0x20 -or ($code -ge 0x7f -and $code -lt 0xa0)) { return "?" }
+              return [char]$code
+            })
+          $bodyText = [regex]::Replace($bodyText, '[\x00-\x1f\x7f-\x9f]', '?')
+          $bodyText = ($bodyText -replace "\s+", " ").Trim()
+          if ($bodyText.Length -gt 240) { $bodyText = $bodyText.Substring(0, 240) }
+          $r.Detail = "HTTP " + $r.Code + " " + $bodyText
+        } else { $r.Detail = "HTTP " + $r.Code }
+      }
       else { $r.Detail = $_.Exception.Message }
     }
     $r
@@ -2652,6 +2778,18 @@ foreach ($c in $Candidates) {
       $r.Code = [int]$_.Exception.Response.StatusCode
       $bodyText = [string]$_.ErrorDetails.Message
       if ($bodyText) {
+        try {
+          $bodyJson = $bodyText | ConvertFrom-Json -ErrorAction Stop
+          $message = if ($bodyJson.error -and $bodyJson.error.message) { [string]$bodyJson.error.message } elseif ($bodyJson.message) { [string]$bodyJson.message } else { $null }
+          if ($message) { $bodyText = $message }
+        } catch { }
+        $bodyText = [regex]::Replace($bodyText, '\\u([0-9a-fA-F]{4})', {
+            param($match)
+            $code = [Convert]::ToInt32($match.Groups[1].Value, 16)
+            if ($code -lt 0x20 -or ($code -ge 0x7f -and $code -lt 0xa0)) { return "?" }
+            return [char]$code
+          })
+        $bodyText = [regex]::Replace($bodyText, '[\x00-\x1f\x7f-\x9f]', '?')
         $bodyText = ($bodyText -replace "\s+", " ").Trim()
         if ($bodyText.Length -gt 240) { $bodyText = $bodyText.Substring(0, 240) }
         $r.Detail = "HTTP " + $r.Code + " " + $bodyText
@@ -2672,32 +2810,10 @@ foreach ($c in $Candidates) {
         $runspaces[$n] = @{ PS = $ps; Handle = $ps.BeginInvoke(); Plan = $plan }
       }
 
-      $buildLines = {
-        $tick = [int][math]::Floor($sw.ElapsedMilliseconds / 400)
-        $dots = ($tick % 7) + 1
-        $lines = @()
-        $lines += ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f "Sel", "Name", "Health", "Method", "Note")
-        $lines += ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f "---", "----", "------", "------", "----")
-        foreach ($p in $profiles) {
-          $nn = Get-AiProfileName -Profile $p
-          $d = $display[$nn]; if (-not $d) { $d = @{ Health = "?"; Method = "-"; Note = ""; Pending = $false } }
-          if ($d.Pending) { $cell = "⏳"; $method = "-"; $note = "waiting ⏳" + ("." * $dots) }
-          else { $cell = $d.Health; $method = $d.Method; $note = $d.Note }
-          # Keep the row on one line (no wrap => clean in-place redraw). Note
-          # column starts at col 41; cap to terminal width (concise errors fit).
-          $noteMax = ([int][Console]::WindowWidth) - 42
-          if ($noteMax -lt 30) { $noteMax = 120 }
-          if ($note.Length -gt $noteMax) { $note = $note.Substring(0, $noteMax) }
-          $sel = if ($nn -eq $saved) { "*" } else { " " }
-          $lines += ("{0,-3} {1,-14} {2,-9} {3,-11} {4}" -f $sel, $nn, $cell, $method, $note)
-        }
-        $lines
-      }
-
-      [Console]::WriteLine($titleStr)
+      [Console]::WriteLine((Limit-AiDisplayText $titleStr $outputWidth))
       $sw = [System.Diagnostics.Stopwatch]::StartNew()
-      $nlines = (& $buildLines).Count
-      foreach ($l in & $buildLines) { [Console]::Write($l + "`n") }
+      $nlines = (& $buildLines 0).Count
+      foreach ($l in & $buildLines 0) { [Console]::Write($l + "`n") }
       while ($pendingNames.Count -gt 0) {
         Start-Sleep -Milliseconds 300
         $done = @()
@@ -2714,21 +2830,22 @@ foreach ($c in $Candidates) {
         }
         if ($done.Count -gt 0) { $pendingNames = @($pendingNames | Where-Object { $_ -notin $done }) }
         [Console]::Write($esc + "[" + $nlines + "A")
-        foreach ($l in & $buildLines) { [Console]::Write("`r" + $esc + "[K" + $l + "`n") }
+        $tick = [int][math]::Floor($sw.ElapsedMilliseconds / 400)
+        foreach ($l in & $buildLines $tick) { [Console]::Write("`r" + $esc + "[K" + $l + "`n") }
       }
     } finally {
       foreach ($n in $expected.Keys) { if ($runspaces[$n] -and $runspaces[$n].PS) { $runspaces[$n].PS.Dispose() } }
     }
-    [Console]::WriteLine($footer)
+    [Console]::WriteLine((Limit-AiDisplayText $footer $outputWidth))
     return
   }
 
   # === Streaming fallback (pipes / CI / non-TTY): one line per completion ===
-  Write-Host $titleStr
+  Write-Host (Limit-AiDisplayText $titleStr $outputWidth)
   if ($tasks.Count -gt 0) {
     $probeProfileCount = 0
     foreach ($n in $expected.Keys) { $probeProfileCount += 1 }
-    Write-Host ("  probing {0} profile(s) in parallel (results stream as they resolve)…" -f $probeProfileCount) -ForegroundColor DarkGray
+    Write-Host (Limit-AiDisplayText ("  probing {0} profile(s) in parallel (results stream as they resolve)…" -f $probeProfileCount) $outputWidth) -ForegroundColor DarkGray
     $reqs = @{}; $doneCount = @{}
     $tasks | Microsoft.PowerShell.Core\ForEach-Object -Parallel $probeBlock -ThrottleLimit ([Math]::Max(8, $tasks.Count)) | ForEach-Object {
       if (-not $reqs.ContainsKey($_.Name)) { $reqs[$_.Name] = @{}; $doneCount[$_.Name] = 0 }
@@ -2737,15 +2854,15 @@ foreach ($c in $Candidates) {
       if ($doneCount[$_.Name] -ge $expected[$_.Name]) {
         & $finalize $_.Name
         $d = $display[$_.Name]
-        Write-Host ("    {0} {1,-14} {2}" -f $d.Health, $_.Name, $d.Note) -ForegroundColor DarkGray
+        Write-Host (Limit-AiDisplayText ("    {0} {1,-14} {2}" -f $d.Health, $_.Name, $d.Note) $outputWidth) -ForegroundColor DarkGray
       }
     }
   }
 
   # Final registry-ordered summary (cached profiles land here too).
   Write-Host ""
-  (& $renderRows) | Format-Table -AutoSize
-  Write-Host $footer -ForegroundColor DarkGray
+  foreach ($line in & $buildLines 0) { Write-Host $line }
+  Write-Host (Limit-AiDisplayText $footer $outputWidth) -ForegroundColor DarkGray
 }
 
 function Show-CodexStatus {
@@ -2769,7 +2886,7 @@ function Show-CodexStatus {
   if ($profile) {
     Write-Host "  Probe model: $(Get-AiProbeModel -Tool codex -Profile $profile)"
     $h = Get-AiProfileHealthCached -Tool "codex" -Profile $profile -Fresh:$Fresh -CacheOnly:(-not $Fresh)
-    Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
+    Write-Host (Format-AiHealthStatusLine $h)
   }
 }
 
@@ -2800,7 +2917,7 @@ function Show-ClaudeStatus {
   if ($cprofile) {
     Write-Host "  Probe model: $(Get-AiProbeModel -Tool claude -Profile $cprofile)"
     $h = Get-AiProfileHealthCached -Tool "claude" -Profile $cprofile -Fresh:$Fresh -CacheOnly:(-not $Fresh)
-    Write-Host ("  Health: " + (Format-AiHealthCell $h) + $(if ($h.Error) { "  " + $h.Error } else { '' }))
+    Write-Host (Format-AiHealthStatusLine $h)
   }
   Write-ClaudeExternalStatus
 }

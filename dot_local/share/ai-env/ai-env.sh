@@ -1570,7 +1570,9 @@ let urls=[];
 if(tool==="claude"){const apiBase=/\/v1$/.test(baseOrigin)?baseOrigin.replace(/\/v1$/,""):baseOrigin;urls.push(apiBase+"/v1/messages");}
 else{const hasVer=/\/v\d+$/.test(baseOrigin);const apiBase=hasVer?baseOrigin:baseOrigin+"/v1";urls.push(apiBase+"/responses");urls.push(apiBase+"/chat/completions");}
 const bodyFor=(u)=>u.endsWith("/responses")?JSON.stringify({model:probeModel,input:".",max_output_tokens:1}):JSON.stringify({model:probeModel,max_tokens:1,messages:[{role:"user",content:"."}]});
-const req=(u)=>new Promise((resolve)=>{const t0=Date.now();let done=false;const fin=(r)=>{if(!done){done=true;r.latencyMs=Date.now()-t0;resolve(r);}};const obj=new URL(u);const lib=obj.protocol==="http:"?http:https;const body=bodyFor(u);const r=lib.request(obj,{method:"POST",headers:{...headers,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)},timeout:20000},(res)=>{let d="";res.on("data",(c)=>d+=c);res.on("end",()=>{const detail=d.replace(/\s+/g," ").trim().slice(0,240);fin({ok:res.statusCode>=200&&res.statusCode<300,code:res.statusCode,body:d,err:detail?"HTTP "+res.statusCode+" "+detail:"HTTP "+res.statusCode});});});r.on("timeout",()=>{r.destroy();fin({ok:false,code:0,body:"",err:"timeout"});});r.on("error",(e)=>fin({ok:false,code:0,body:"",err:probeErr(e.message)}));r.write(body);r.end();});const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(String(x||"").toLowerCase());
+const decode=(x)=>String(x||"").replace(/\\u([0-9a-f]{4})/gi,(raw,hex)=>{const code=parseInt(hex,16);return code<0x20||(code>=0x7f&&code<0xa0)?"?":String.fromCharCode(code)}).replace(/[\u0000-\u001f\u007f-\u009f]/g,"?");
+const compactBody=(raw)=>{try{const j=JSON.parse(raw);const msg=j?.error?.message||j?.message||j?.error||j?.type||"";if(msg)return decode(msg).replace(/\s+/g," ").trim();}catch{}return decode(raw).replace(/\s+/g," ").trim();};
+const req=(u)=>new Promise((resolve)=>{const t0=Date.now();let done=false;const fin=(r)=>{if(!done){done=true;r.latencyMs=Date.now()-t0;resolve(r);}};const obj=new URL(u);const lib=obj.protocol==="http:"?http:https;const body=bodyFor(u);const r=lib.request(obj,{method:"POST",headers:{...headers,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)},timeout:20000},(res)=>{let d="";res.on("data",(c)=>d+=c);res.on("end",()=>{const detail=compactBody(d).slice(0,240);fin({ok:res.statusCode>=200&&res.statusCode<300,code:res.statusCode,body:d,err:detail?"HTTP "+res.statusCode+" "+detail:"HTTP "+res.statusCode});});});r.on("timeout",()=>{r.destroy();fin({ok:false,code:0,body:"",err:"timeout"});});r.on("error",(e)=>fin({ok:false,code:0,body:"",err:probeErr(e.message)}));r.write(body);r.end();});const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(decode(x).toLowerCase());
 (async()=>{let lastErr=null,anyTransient=false;for(const u of urls){const r=await req(u);if(r.ok){let valid=true;try{const j=JSON.parse(r.body);if(u.endsWith("/messages"))valid=(Array.isArray(j.content)&&j.content.length>0)||j.type==="message";else if(u.endsWith("/responses"))valid=(Array.isArray(j.output)&&j.output.length>0)||j.output_text||j.status==="completed";else valid=Array.isArray(j.choices)&&j.choices.length>0;}catch{valid=false;}if(valid){const st=r.latencyMs>degradedMs?"degraded":"healthy";return out({status:st,latencyMs:r.latencyMs,method:"generation",error:null});}lastErr="200 but no generated content";}else{lastErr=r.err||(r.code?("HTTP "+r.code):"request failed");if(modelUnsupported(lastErr))return out({status:"degraded",latencyMs:r.latencyMs||0,method:"none",error:String(lastErr)});if(r.code===429||(r.code>=500&&r.code<600))anyTransient=true;}}
 if(anyTransient)return out({status:"degraded",latencyMs:0,method:"none",error:String(lastErr)+(anyTransient?" (transient)":"")});
 return out({status:"down",latencyMs:0,method:"none",error:String(lastErr)});
@@ -1646,13 +1648,13 @@ _ai_health_cell_cached() {
 }
 
 _ai_health_display_error() {
-  local error="${1:-}"
-  [ -n "$error" ] || return 0
+  local error="${1:-}" max="${2:-${AI_HEALTH_COLUMNS:-${COLUMNS:-120}}}" prefix="${3:-}"
   node -e '
-const text=String(process.argv[1]||"").replace(/\s+/g," ").trim();
-const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(String(x||"").toLowerCase());
+const decode=(x)=>String(x||"").replace(/\\u([0-9a-f]{4})/gi,(raw,hex)=>{const code=parseInt(hex,16);return code<0x20||(code>=0x7f&&code<0xa0)?"?":String.fromCharCode(code)}).replace(/[\u0000-\u001f\u007f-\u009f]/g,"?");
+const text=decode(process.argv[1]).replace(/\s+/g," ").trim();
+const modelUnsupported=(x)=>/no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(decode(x).toLowerCase());
 const compactHttp=(s)=>{
-  s=String(s||"").replace(/\s+/g," ").trim();
+  s=decode(s).replace(/\s+/g," ").trim();
   const m=s.match(/^(HTTP \d{3})(?:\s+(.+))?$/);
   if(!m)return s;
   const code=m[1], body=m[2]||"";
@@ -1669,8 +1671,12 @@ let out=text;
 if(dual)out=dual[1]+short(dual[2])+dual[3]+short(dual[4]);
 else if(one)out=one[1]+short(one[2]);
 else out=short(text);
-process.stdout.write(out);
-' "$error"
+const charWidth=(cp)=>cp===0||cp<32||(cp>=0x7f&&cp<0xa0)?0:(cp>=0x1100&&(cp<=0x115f||cp===0x2329||cp===0x232a||(cp>=0x2e80&&cp<=0xa4cf)||(cp>=0xac00&&cp<=0xd7a3)||(cp>=0xf900&&cp<=0xfaff)||(cp>=0xfe10&&cp<=0xfe19)||(cp>=0xfe30&&cp<=0xfe6f)||(cp>=0xff00&&cp<=0xff60)||(cp>=0xffe0&&cp<=0xffe6)||(cp>=0x1f300&&cp<=0x1faff)))?2:1;
+const width=(s)=>{let n=0;for(const ch of String(s||""))n+=charWidth(ch.codePointAt(0));return n};
+const trunc=(s,n)=>{s=String(s||"");if(width(s)<=n)return s;const suffix=n>3?"...":"",limit=Math.max(0,n-width(suffix));let result="",w=0;for(const ch of s){const cw=charWidth(ch.codePointAt(0));if(w+cw>limit)break;result+=ch;w+=cw}return result+suffix};
+const requested=Number(process.argv[2]||120),max=Math.max(1,Math.min(120,requested>0?requested:120)),prefix=String(process.argv[3]||"");
+process.stdout.write(trunc(prefix+(prefix&&out?"  ":"")+out,max));
+' "$error" "$max" "$prefix"
 }
 
 _ai_healthy_profile() {
@@ -1767,7 +1773,7 @@ _ai_health_show() {
 
 # $3=1 forces a live probe (status --refresh); otherwise cache-only (instant).
 _ai_health_status_line() {
-  local tool="$1" profile_json="$2" fresh="${3:-0}" h cell err
+  local tool="$1" profile_json="$2" fresh="${3:-0}" h cell err max
   if [ "$fresh" = "1" ]; then
     h="$(_ai_health_cached "$tool" "$profile_json" 1 0)"
   else
@@ -1775,8 +1781,9 @@ _ai_health_status_line() {
   fi
   cell="$(_ai_health_cell "$h")"
   err="$(_ai_health_field "$h" error)"
-  [ -n "$err" ] && err="  $err"
-  printf '  Health: %s%s\n' "$cell" "$err"
+  max="${AI_HEALTH_COLUMNS:-${COLUMNS:-120}}"
+  _ai_health_display_error "$err" "$max" "  Health: $cell"
+  printf '\n'
 }
 
 # ===================== MCP module (mirrors ai-env.ps1) =====================

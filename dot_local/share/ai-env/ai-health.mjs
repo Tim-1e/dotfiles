@@ -24,6 +24,7 @@ const TTL = Number(process.env.AI_HEALTH_TTL || 300);
 const TIMEOUT_MS = Number(process.env.AI_HEALTH_TIMEOUT_MS || 8000);
 const DEGRADED_MS = Number(process.env.AI_HEALTH_DEGRADED_MS || 8000);
 const isTty = process.stdout.isTTY && process.env.AI_HEALTH_LIVE !== '0';
+const MAX_OUTPUT_WIDTH = 120;
 
 // ---------- secrets.toml + config parsing (ported from _ai_probe_health) ----------
 function parseSecrets(file) {
@@ -157,7 +158,7 @@ function fetchOne(c, headers) {
             else valid = Array.isArray(j.choices) && j.choices.length > 0;
           } catch {}
         }
-        const compactBody = d.replace(/\s+/g, ' ').trim().slice(0, 240);
+        const compactBody = compactResponseBody(d).slice(0, 240);
         fin({ ok: valid, code: res.statusCode, detail: valid ? null : (res.statusCode >= 200 && res.statusCode < 300 ? '200 but no generated content' : ('HTTP ' + res.statusCode + (compactBody ? ' ' + compactBody : ''))) });
       });
     });
@@ -177,12 +178,28 @@ function classifyErr(m) {
   if (/econnreset|socket hang up|reset/.test(l)) return 'connection reset';
   return m;
 }
+function decodeUnicodeEscapes(value) {
+  const decoded = String(value || '').replace(/\\u([0-9a-f]{4})/gi, (raw, hex) => {
+    const code = Number.parseInt(hex, 16);
+    return code < 0x20 || (code >= 0x7f && code < 0xa0) ? '?' : String.fromCharCode(code);
+  });
+  return decoded.replace(/[\u0000-\u001f\u007f-\u009f]/g, '?');
+}
+function compactResponseBody(body) {
+  const raw = String(body || '');
+  try {
+    const j = JSON.parse(raw);
+    const msg = j?.error?.message || j?.message || j?.error || j?.type || '';
+    if (msg) return decodeUnicodeEscapes(msg).replace(/\s+/g, ' ').trim();
+  } catch {}
+  return decodeUnicodeEscapes(raw).replace(/\s+/g, ' ').trim();
+}
 function isModelUnsupported(detail) {
-  const l = ('' + detail).toLowerCase();
+  const l = decodeUnicodeEscapes(detail).toLowerCase();
   return /no available providers|model_not_found|model not found|model does not exist|unknown model|unsupported model|model .*not supported|not support.*model|invalid model|model_not_supported|模型不存在|模型.*不存在|请检查模型代码/.test(l);
 }
 function compactHttpDetail(detail) {
-  const text = String(detail || '').replace(/\s+/g, ' ').trim();
+  const text = decodeUnicodeEscapes(detail).replace(/\s+/g, ' ').trim();
   const http = text.match(/^(HTTP \d{3})(?:\s+(.+))?$/);
   if (!http) return text;
   const code = http[1];
@@ -284,13 +301,21 @@ function trunc(s, n) {
   }
   return out + suffix;
 }
+function outputWidth() {
+  const configured = Number(process.env.AI_HEALTH_COLUMNS || 0);
+  const detected = configured > 0 ? configured : (process.stdout.columns || MAX_OUTPUT_WIDTH);
+  return Math.max(1, Math.min(MAX_OUTPUT_WIDTH, detected));
+}
+function boundedLine(text) {
+  return trunc(text, outputWidth());
+}
 function buildTable(rows, saved, tick) {
-  const cols = process.stdout.columns || 100;
+  const cols = outputWidth();
   const w = { sel: 2, name: 14, health: 10, method: 12 };
-  const noteW = Math.max(20, cols - (w.sel + w.name + w.health + w.method + 5));
+  const noteW = Math.max(0, cols - (w.sel + w.name + w.health + w.method + 5));
   const lines = [];
   const fmt = (a, b, c, d, e) =>
-    `${padDisplay(a, w.sel)} ${padDisplay(b, w.name)} ${padDisplay(c, w.health)} ${padDisplay(d, w.method)} ${trunc(e, noteW)}`;
+    trunc(`${padDisplay(a, w.sel)} ${padDisplay(b, w.name)} ${padDisplay(c, w.health)} ${padDisplay(d, w.method)} ${trunc(e, noteW)}`, cols);
   lines.push(fmt('Sel', 'Name', 'Health', 'Method', 'Note'));
   lines.push(fmt('---', '----', '------', '------', '----'));
   for (const r of rows) {
@@ -338,13 +363,13 @@ async function main() {
     todo.push({ p, i: rows.length - 1 });
   }
 
-  process.stdout.write(label + ' profile health (' + registryPath + '):\n');
+  process.stdout.write(boundedLine(label + ' profile health (' + registryPath + '):') + '\n');
   const updates = {};
 
   if (!isTty || todo.length === 0) {
     // Non-TTY: probe all (concurrent), then print final table.
     if (todo.length) {
-      process.stdout.write('  probing ' + todo.length + ' profile(s) in parallel…\n');
+      process.stdout.write(boundedLine('  probing ' + todo.length + ' profile(s) in parallel…') + '\n');
       await Promise.all(todo.map(async (t) => {
         const r = await probeProfile(t.p);
         rows[t.i] = { name: rows[t.i].name, ...r };
@@ -353,7 +378,7 @@ async function main() {
     }
     writeCache(updates);
     process.stdout.write(buildTable(rows, savedName, 0) + '\n');
-    process.stdout.write('  (health ' + (fresh ? 're-probed (fresh, parallel)' : 'cached <=5min') + '; ' + tool + ' health --fresh re-probe, ' + tool + ' health-clear clears)\n');
+    process.stdout.write(boundedLine('  (health ' + (fresh ? 're-probed (fresh, parallel)' : 'cached <=5min') + '; ' + tool + ' health --fresh re-probe, ' + tool + ' health-clear clears)') + '\n');
     return;
   }
 
@@ -389,6 +414,6 @@ async function main() {
   clearInterval(timer);
   writeCache(updates);
   render(true);
-  process.stdout.write(SHOW + '\n  (health ' + (fresh ? 're-probed (fresh, parallel)' : 'cached <=5min') + '; ' + tool + ' health --fresh re-probe, ' + tool + ' health-clear clears)\n');
+  process.stdout.write(SHOW + '\n' + boundedLine('  (health ' + (fresh ? 're-probed (fresh, parallel)' : 'cached <=5min') + '; ' + tool + ' health --fresh re-probe, ' + tool + ' health-clear clears)') + '\n');
 }
-main().catch((e) => { process.stderr.write('health error: ' + (e && e.message || e) + '\n'); process.exit(1); });
+main().catch((e) => { process.stderr.write(boundedLine('health error: ' + (e && e.message || e)) + '\n'); process.exit(1); });
