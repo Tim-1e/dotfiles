@@ -2,6 +2,7 @@
   "schema": 1,
   "defaults": {
     "codex": "sub",
+    "codex_app": "sub",
     "claude": "sub"
   },
   "codex": [

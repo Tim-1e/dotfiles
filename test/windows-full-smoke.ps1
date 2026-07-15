@@ -48,6 +48,7 @@ Assert-File -Path (Join-Path $codexHome "config.toml")
 Assert-File -Path (Join-Path $codexHome "sub.config.toml")
 Assert-File -Path (Join-Path $codexHome "api.config.toml")
 Assert-File -Path (Join-Path $codexHome "api-docker.config.toml")
+Assert-File -Path (Join-Path $codexHome "app-auth\codex-app-token.ps1")
 Assert-File -Path (Join-Path $HOME ".claude\settings.json")
 
 Assert-Contains -Path $profilePath -Pattern "chezmoi-ai-env begin" -Message "PowerShell profile is missing the ai-env begin marker."
@@ -72,6 +73,10 @@ $ccHelp = (& { cc help } 6>&1 | Out-String)
 $cxList = (& { cx list } 6>&1 | Out-String)
 $ccList = (& { cc list } 6>&1 | Out-String)
 if ($cxHelp -notmatch "cx - switch Codex state") { throw "cx help failed in child pwsh session." }
+if ($cxHelp -notmatch "cx app-default") { throw "cx app-default help is missing in child pwsh session." }
+foreach ($command in @("cx sessions", "cx resume", "cx app-bridge")) {
+  if ($cxHelp -notmatch [regex]::Escape($command)) { throw "$command help is missing in child pwsh session." }
+}
 if ($ccHelp -notmatch "cc - switch Claude Code state") { throw "cc help failed in child pwsh session." }
 if ($cxList -notmatch "Codex profiles") { throw "cx list failed in child pwsh session." }
 if ($ccList -notmatch "Claude Code profiles") { throw "cc list failed in child pwsh session." }
