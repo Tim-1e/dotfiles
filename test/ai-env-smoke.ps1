@@ -315,3 +315,8 @@ env_key = "OPENAI_API_KEY"
   }
   Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# GitHub Actions' PowerShell wrapper exits with the most recent native process
+# code. The smoke test intentionally runs failing token-helper probes, so make
+# the script's successful outcome explicit after all assertions and cleanup.
+exit 0

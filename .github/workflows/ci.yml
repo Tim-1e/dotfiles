@@ -116,6 +116,8 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile("Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/fonts-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/ai-env-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("test/codex-provider-bridge.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("test/codex-app-bridge-management.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/powershell-profile-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/windows-full-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) {
@@ -125,6 +127,11 @@ jobs:
 
       - name: Test AI env PowerShell helpers
         run: ./test/ai-env-smoke.ps1 -SourceDir "$PWD"
+
+      - name: Test Codex App provider bridge
+        run: |
+          ./test/codex-provider-bridge.ps1 -SourceDir "$PWD"
+          ./test/codex-app-bridge-management.ps1 -SourceDir "$PWD"
 
       - name: Test PowerShell profile load
         run: ./test/powershell-profile-smoke.ps1 -SourceDir "$PWD"

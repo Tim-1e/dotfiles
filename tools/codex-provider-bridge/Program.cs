@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -11,6 +12,7 @@ internal static class Program
 {
     private const string SettingsFileName = "codex-provider-bridge.json";
     private const string ActiveEnvironmentVariable = "CODEX_PROVIDER_BRIDGE_ACTIVE";
+    private static ChildProcessJob? processLifetimeJob;
 
     public static async Task<int> Main(string[] args)
     {
@@ -21,6 +23,12 @@ internal static class Program
                 throw new InvalidOperationException("Recursive Codex provider bridge launch was rejected.");
             }
 
+            Console.InputEncoding = new UTF8Encoding(false);
+            // Joining the bridge itself before Process.Start makes all later
+            // Codex descendants inherit the kill-on-close job atomically.
+            // Keep the handle rooted until process teardown; closing it early
+            // would intentionally terminate this process as a job member.
+            processLifetimeJob = ChildProcessJob.CreateForCurrentProcess();
             var settings = LoadSettings();
             using var child = StartCodex(settings, args);
             return await ProxyAsync(child);
@@ -132,6 +140,7 @@ internal static class Program
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true,
+            StandardInputEncoding = new UTF8Encoding(false),
         };
         foreach (var argument in settings.RealCodexPrefixArgs)
         {

@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 $projectPath = Join-Path $SourceDir "tools/codex-provider-bridge/CodexProviderBridge.csproj"
 $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-provider-bridge-test-" + [guid]::NewGuid().ToString("N"))
 $publishDir = Join-Path $tmpRoot "publish"
+$stubbornProcess = @()
 
 function Start-TestProcess {
   param(
@@ -47,6 +48,8 @@ try {
   $fakeServerPath = Join-Path $tmpRoot "fake-app-server.ps1"
   @'
 $ErrorActionPreference = "Stop"
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::Error.WriteLine("ARGS=" + ($args | ConvertTo-Json -Compress))
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   [Console]::Out.WriteLine($line)
@@ -66,11 +69,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
   $resume = '{"id":"resume","method":"thread/resume","params":{"threadId":"abc","modelProvider":"ai-env-app"}}'
   $invalid = 'not-json'
   $nonStringMethod = '{"id":"weird","method":7,"params":{}}'
-  $result = Start-TestProcess -Executable $bridgePath -Arguments @("alpha", "with space") -InputLines @($listNull, $listFiltered, $resume, $invalid, $nonStringMethod)
+  $unicodeResume = '{"id":"unicode","method":"thread/resume","params":{"threadId":"跨-provider-✓"}}'
+  $result = Start-TestProcess -Executable $bridgePath -Arguments @("alpha", "with space") -InputLines @($listNull, $listFiltered, $resume, $invalid, $nonStringMethod, $unicodeResume)
   if ($result.ExitCode -ne 0) { throw "Bridge failed: $($result.Stderr)" }
 
   $lines = @($result.Stdout -split '\r?\n' | Where-Object { $_ -ne "" })
-  if ($lines.Count -ne 5) { throw "Expected five stdout lines, got $($lines.Count): $($result.Stdout)" }
+  if ($lines.Count -ne 6) { throw "Expected six stdout lines, got $($lines.Count): $($result.Stdout)" }
   foreach ($index in 0, 1) {
     $message = $lines[$index] | ConvertFrom-Json -Depth 20
     if ($message.method -ne "thread/list") { throw "List request method changed" }
@@ -81,7 +85,60 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
   if ($lines[2] -cne $resume) { throw "thread/resume was modified by the bridge" }
   if ($lines[3] -cne $invalid) { throw "Malformed non-JSON input was not forwarded unchanged" }
   if ($lines[4] -cne $nonStringMethod) { throw "JSON with a non-string method was not forwarded unchanged" }
+  if ($lines[5] -cne $unicodeResume) { throw "UTF-8 input was not forwarded unchanged" }
   if ($result.Stderr -notmatch 'ARGS=\["alpha","with space"\]') { throw "Child arguments or stderr were not forwarded" }
+
+  $stubbornServerPath = Join-Path $tmpRoot "stubborn-app-server.ps1"
+  $stubbornPidPath = Join-Path $tmpRoot "stubborn-app-server.pid"
+  @'
+param([string]$PidPath)
+$startInfo = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+$startInfo.ArgumentList.Add("-NoLogo")
+$startInfo.ArgumentList.Add("-NoProfile")
+$startInfo.ArgumentList.Add("-NonInteractive")
+$startInfo.ArgumentList.Add("-Command")
+$startInfo.ArgumentList.Add("while (`$true) { Start-Sleep -Milliseconds 200 }")
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$grandchild = [Diagnostics.Process]::Start($startInfo)
+"$PID,$($grandchild.Id)" | Set-Content -LiteralPath $PidPath -Encoding ascii
+while ($true) { Start-Sleep -Milliseconds 200 }
+'@ | Set-Content -LiteralPath $stubbornServerPath -Encoding UTF8
+  [ordered]@{
+    realCodexPath = (Get-Process -Id $PID).Path
+    realCodexSha256 = (Get-FileHash -LiteralPath (Get-Process -Id $PID).Path -Algorithm SHA256).Hash
+    realCodexPrefixArgs = @("-NoLogo", "-NoProfile", "-NonInteractive", "-File", $stubbornServerPath, $stubbornPidPath)
+  } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+
+  $stubbornStartInfo = [Diagnostics.ProcessStartInfo]::new($bridgePath)
+  $stubbornStartInfo.UseShellExecute = $false
+  $stubbornStartInfo.RedirectStandardInput = $true
+  $stubbornStartInfo.RedirectStandardOutput = $true
+  $stubbornStartInfo.RedirectStandardError = $true
+  $stubbornBridge = [Diagnostics.Process]::Start($stubbornStartInfo)
+  try {
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $stubbornPidPath) -and [DateTime]::UtcNow -lt $deadline) {
+      Start-Sleep -Milliseconds 100
+    }
+    if (-not (Test-Path -LiteralPath $stubbornPidPath)) { throw "Stubborn downstream did not start" }
+    $stubbornPids = @((Get-Content -LiteralPath $stubbornPidPath -Raw).Trim() -split ',' | ForEach-Object { [int]$_ })
+    if ($stubbornPids.Count -ne 2) { throw "Stubborn downstream did not report child and grandchild PIDs" }
+    $stubbornProcess = @(Get-Process -Id $stubbornPids -ErrorAction Stop)
+    if ($stubbornProcess.Count -ne 2) { throw "Stubborn downstream process tree was incomplete" }
+    foreach ($item in $stubbornProcess) { [void]$item.Handle }
+    $stubbornBridge.Kill()
+    if (-not $stubbornBridge.WaitForExit(5000)) { throw "Bridge did not terminate" }
+    $exitDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+      $survivingProcesses = @($stubbornProcess | Where-Object { -not $_.HasExited })
+      if ($survivingProcesses.Count -gt 0) { Start-Sleep -Milliseconds 100 }
+    } while ($survivingProcesses.Count -gt 0 -and [DateTime]::UtcNow -lt $exitDeadline)
+    if ($survivingProcesses.Count -gt 0) { throw "Downstream process tree survived bridge termination" }
+  } finally {
+    if (-not $stubbornBridge.HasExited) { $stubbornBridge.Kill($true) }
+    $stubbornBridge.Dispose()
+  }
 
   $missingDir = Join-Path $tmpRoot "missing-settings"
   New-Item -ItemType Directory -Force -Path $missingDir | Out-Null
@@ -111,5 +168,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
   Write-Host "Codex provider bridge tests passed"
 } finally {
+  foreach ($process in @($stubbornProcess)) {
+    if ($null -ne $process -and -not $process.HasExited) {
+      $process.Kill($true)
+      $process.WaitForExit()
+    }
+    if ($null -ne $process) { $process.Dispose() }
+  }
   Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
