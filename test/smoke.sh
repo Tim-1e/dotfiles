@@ -55,7 +55,28 @@ else
 fi
 
 bash "$SOURCE_DIR/test/fonts-smoke.sh"
-bash "$SOURCE_DIR/test/ai-env-smoke.sh"
+if [ "${INSTALL_CXCC:-1}" = "0" ]; then
+  echo "skipped cxcc smoke: INSTALL_CXCC=0" >&2
+else
+  bash "$SOURCE_DIR/test/cxcc-consumer-smoke.sh"
+
+  cxcc_root="${CXCC_HOME:-$HOME/.local/share/cxcc}"
+  check_file "$cxcc_root/.cxcc-root"
+  check_file "$cxcc_root/current.json"
+  check_file "$cxcc_root/load.sh"
+  check_file "$cxcc_root/load.ps1"
+  cxcc_version="$(sed -n 's/^.*"version":"\([^"]*\)".*$/\1/p' "$cxcc_root/current.json")"
+  check_file "$cxcc_root/versions/$cxcc_version/VERSION"
+  [ "$(cat "$cxcc_root/versions/$cxcc_version/VERSION")" = "$cxcc_version" ] || {
+    echo "cxcc installed version metadata is invalid" >&2
+    exit 1
+  }
+  # shellcheck source=/dev/null
+  source "$cxcc_root/load.sh"
+  cx help >/dev/null
+  cc help >/dev/null
+  mcp help >/dev/null
+fi
 
 FASTFETCH_OK=0
 if command -v fastfetch >/dev/null 2>&1 && fastfetch --version >/dev/null 2>&1; then

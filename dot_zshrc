@@ -93,10 +93,12 @@ if [ -f "$HOME/.claude/auth.env" ]; then
   set +a
 fi
 
-# AI environment profile wrappers managed by dotfiles.
-if [ -f "$HOME/.local/share/ai-env/ai-env.sh" ]; then
-  source "$HOME/.local/share/ai-env/ai-env.sh"
+# cxcc profile wrappers managed by the pinned release installer.
+_cxcc_home="${CXCC_HOME:-$HOME/.local/share/cxcc}"
+if [ -f "$_cxcc_home/load.sh" ]; then
+  source "$_cxcc_home/load.sh"
 fi
+unset _cxcc_home
 
 zd() {
   local dir
