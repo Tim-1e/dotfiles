@@ -1,11 +1,11 @@
 {{- if eq .chezmoi.os "windows" -}}
-# Documents/PowerShell/Scripts/ai-env.ps1 checksum: {{ include "Documents/PowerShell/Scripts/ai-env.ps1" | sha256sum }}
+# cxcc version: {{ .cxcc.version }}
 
 $ErrorActionPreference = "Stop"
 
 $isWindowsHost = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { $IsWindows } else { $env:OS -eq "Windows_NT" }
 if (-not $isWindowsHost) {
-  Write-Host "Skipping PowerShell ai-env profile hook on non-Windows host."
+  Write-Host "Skipping PowerShell cxcc profile hook on non-Windows host."
   exit 0
 }
 
@@ -17,9 +17,10 @@ $begin = "# chezmoi-ai-env begin"
 $end = "# chezmoi-ai-env end"
 $block = @'
 # chezmoi-ai-env begin
-$aiEnv = Join-Path $HOME 'Documents\PowerShell\Scripts\ai-env.ps1'
-if (Test-Path -LiteralPath $aiEnv) {
-  . $aiEnv
+$cxccRoot = if ($env:CXCC_HOME) { [Environment]::ExpandEnvironmentVariables($env:CXCC_HOME) } else { Join-Path $HOME '.local\share\cxcc' }
+$cxccLoader = Join-Path $cxccRoot 'load.ps1'
+if (Test-Path -LiteralPath $cxccLoader) {
+  . $cxccLoader
 }
 # chezmoi-ai-env end
 '@.Trim()

@@ -10,8 +10,9 @@ Windows PowerShell。它主要同步三层内容：
 - **基础环境**：shell、tmux、字体、运行时安装脚本，以及跨平台 bootstrap。
 - **现代命令行工具**：把 `rg`、`fd`、`jq`、`yq`、`delta`、`dust`、`duf`、
   `xh`、`btop` 等日常工具安装到用户目录。
-- **AI 工作区工具**：`cx`、`cc`、`mcp`，用于切换 Codex / Claude Code
-  配置、API router、健康检查、MCP 同步和密钥隔离。
+- **AI 工作区工具**：固定版本的 [cxcc](https://github.com/Tim-1e/cxcc)
+  提供 `cx`、`cc`、`mcp`，用于切换 Codex / Claude Code 配置、API router、
+  健康检查、MCP 同步和密钥隔离。
 
 仓库只创建缺失的默认配置，尽量不覆盖机器上的已有设置。真实密钥不进 git。
 
@@ -22,7 +23,8 @@ Windows PowerShell。它主要同步三层内容：
 | 基础 shell | zsh、Oh My Zsh 插件、tmux、fzf、zoxide、uv、rustup、locale 保护 | `dot_zshrc`, `dot_tmux.conf`, `scripts/install.sh` |
 | 现代 CLI | 预编译 release binary 安装到 `~/.local/bin`，无需 root | `scripts/install/modern-cli.sh` |
 | 字体 | 0xProto Nerd Font，覆盖 Linux、macOS、Windows、WSL host | `0xProto/`, font run-on-change 脚本 |
-| Windows | PowerShell profile hook 和 `cx`/`cc` helper | `Documents/PowerShell/Scripts/ai-env.ps1` |
+| cxcc | 固定版本的跨平台安装器和稳定 shell loader | `.chezmoidata.toml`, `scripts/install/cxcc.*`, `run_before_10-install-cxcc.*.tmpl` |
+| Windows | 加载 cxcc 的 PowerShell profile 与兼容 hook | `Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1`, `run_onchange_after_10-powershell-ai-env-hook.ps1.tmpl` |
 | AI profiles | Codex/Claude profile registry、health cache、本地状态、默认种子配置 | `dot_ai-env/`, `dot_codex/`, `dot_claude/` |
 | MCP | 本机 MCP registry，并同步到 Claude Code / Codex | `~/.ai-env/mcp.toml`, `mcp` helper |
 | Secrets | 只提供安全模板，真实 key 放在仓库外 | `secret_examples/`, `~/.ai-secrets/secrets.toml` |
@@ -66,6 +68,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
+INSTALL_CXCC=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FONTS=0 bash ./bootstrap.sh
 INSTALL_WINDOWS_FONTS_FROM_WSL=0 bash ./bootstrap.sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
@@ -86,7 +89,7 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/
 - 兼容的 fastfetch 到 `~/.local/bin`
 - Node.js 和 npm，默认随系统包安装
 - 0xProto Nerd Font 到当前用户字体目录
-- Windows PowerShell 的 `cx` / `cc` profile hook
+- 固定版本的 cxcc，以及加载 `cx`、`cc`、`mcp` 的 PowerShell/Zsh hook
 
 如果系统没有 zsh，但有编译工具，脚本会把 zsh 编译到 `~/.local`。老 Linux
 系统上，fastfetch 会优先尝试 polyfilled binary；没有合适版本时跳过，不让整个
@@ -113,8 +116,9 @@ apply 失败。
 
 ## CX/CC AI Profile 工具
 
-仓库提供轻量 shell function，用于切换 Codex 和 Claude Code 的本地状态，
-但不会直接启动 CLI：
+dotfiles 安装固定版本的 cxcc，再加载其轻量 shell function，用于切换 Codex 和
+Claude Code 的本地状态，但不会直接启动 CLI。命令实现和跨平台测试归 cxcc 仓库
+维护；本仓库只负责版本钉住、安装 hook、loader 接线和默认用户配置：
 
 ```sh
 cx list
@@ -144,9 +148,14 @@ cc edit
 安装位置：
 
 ```text
-Windows: ~/Documents/PowerShell/Scripts/ai-env.ps1
-Linux:   ~/.local/share/ai-env/ai-env.sh
+PowerShell: ~/.local/share/cxcc/load.ps1
+Bash/Zsh:  ~/.local/share/cxcc/load.sh
+Payload:   ~/.local/share/cxcc/versions/v0.1.0/
 ```
+
+release tag、不可变 commit、installer digest 和平台 artifact digest 统一位于
+`.chezmoidata.toml`；同步更新这些 pin 后运行 `chezmoi apply` 即可升级。设置
+`INSTALL_CXCC=0` 会跳过安装，之后取消变量再 apply 即可恢复。
 
 运行状态：
 
@@ -254,12 +263,13 @@ ANTHROPIC_AUTH_TOKEN = "sk-..."
 | `dot_zshrc` | `~/.zshrc` |
 | `dot_tmux.conf` | `~/.tmux.conf` |
 | `dot_config/fastfetch/*` | `~/.config/fastfetch/*` |
-| `dot_local/share/ai-env/ai-env.sh` | `~/.local/share/ai-env/ai-env.sh` |
+| `.chezmoidata.toml`, `scripts/install/cxcc.*` | 安装固定版本 cxcc 到 `~/.local/share/cxcc` |
 | `dot_ai-env/create_profiles.json` | `~/.ai-env/profiles.json`，仅缺失时创建 |
 | `dot_codex/create_*.toml` | `~/.codex/*.toml`，仅缺失时创建 |
 | `dot_claude/create_settings.json` | `~/.claude/settings.json`，仅缺失时创建 |
-| `Documents/PowerShell/Scripts/ai-env.ps1` | Windows PowerShell helper |
+| `Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1` | 加载 `~/.local/share/cxcc/load.ps1` 的 Windows profile |
 | `run_onchange_before_00-install-env.sh.tmpl` | 安装 hook |
+| `run_before_10-install-cxcc.*.tmpl` | 固定版本 cxcc 安装 hook |
 | `run_after_99-smoke-test.sh.tmpl` | apply 后 smoke hook |
 
 `create_` 前缀文件只 seed 缺失配置，不覆盖已有机器设置。
@@ -267,20 +277,13 @@ ANTHROPIC_AUTH_TOKEN = "sk-..."
 ## 验证
 
 ```powershell
-pwsh -NoProfile -File test/ai-env-smoke.ps1 -SourceDir .
-pwsh -NoProfile -File test/ai-env-health.ps1 -SourceDir .
+pwsh -NoProfile -File test/cxcc-consumer-smoke.ps1
+pwsh -NoProfile -File test/powershell-profile-smoke.ps1 -SourceDir .
 ```
 
 ```sh
-bash -n dot_local/share/ai-env/ai-env.sh
-node --check dot_local/share/ai-env/ai-health.mjs
-bash test/ai-env-smoke.sh
-```
-
-本地 Claude Docker 容器里的 Linux 验证：
-
-```sh
-docker compose exec -T claude bash -lc 'cd /workspace/CodeX_desk/dotfiles && chezmoi apply --force -- "$HOME/.local" && source "$HOME/.local/share/ai-env/ai-env.sh" && bash test/ai-env-smoke.sh'
+bash -n scripts/install/cxcc.sh test/cxcc-consumer-smoke.sh
+bash test/cxcc-consumer-smoke.sh
 ```
 
 ## AI 协作维护

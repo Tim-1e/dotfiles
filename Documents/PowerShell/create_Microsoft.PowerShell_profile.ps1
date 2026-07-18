@@ -76,9 +76,9 @@ if (($isPaseoTerminal -or -not $env:CODEX_THREAD_ID) -and (Get-Command oh-my-pos
 }
 
 # chezmoi-ai-env begin
-$aiEnvScriptHome = if ($env:AI_ENV_SCRIPT_HOME) { [Environment]::ExpandEnvironmentVariables($env:AI_ENV_SCRIPT_HOME) } else { $HOME }
-$aiEnv = Join-Path $aiEnvScriptHome 'Documents\PowerShell\Scripts\ai-env.ps1'
-if (Test-Path -LiteralPath $aiEnv) {
-  . $aiEnv
+$cxccRoot = if ($env:CXCC_HOME) { [Environment]::ExpandEnvironmentVariables($env:CXCC_HOME) } else { Join-Path $HOME '.local\share\cxcc' }
+$cxccLoader = Join-Path $cxccRoot 'load.ps1'
+if (Test-Path -LiteralPath $cxccLoader) {
+  . $cxccLoader
 }
 # chezmoi-ai-env end

@@ -1,0 +1,9 @@
+{{- if eq .chezmoi.os "windows" -}}
+$ErrorActionPreference = "Stop"
+
+& "{{ .chezmoi.sourceDir }}\scripts\install\cxcc.ps1" `
+  -Version "{{ .cxcc.version }}" `
+  -Commit "{{ .cxcc.commit }}" `
+  -InstallerSha256 "{{ .cxcc.installerPowerShellSha256 }}" `
+  -ArtifactSha256 "{{ .cxcc.windowsArtifactSha256 }}"
+{{- end -}}

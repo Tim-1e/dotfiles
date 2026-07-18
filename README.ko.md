@@ -10,8 +10,9 @@ Linux, WSL, Termux, Windows PowerShell 환경을 chezmoi로 관리하는 dotfile
 - **기본 환경**: shell, tmux, font, runtime 설치 스크립트, 안전한 크로스 플랫폼 bootstrap.
 - **현대적인 CLI 도구**: `rg`, `fd`, `jq`, `yq`, `delta`, `dust`, `duf`,
   `xh`, `btop` 등을 사용자 디렉터리에 설치.
-- **AI 작업 도구**: `cx`, `cc`, `mcp`로 Codex / Claude Code 프로필, API
-  router, health check, MCP sync, secret-safe switching을 관리.
+- **AI 작업 도구**: 고정 버전의 [cxcc](https://github.com/Tim-1e/cxcc)가
+  `cx`, `cc`, `mcp`를 제공해 Codex / Claude Code 프로필, API router,
+  health check, MCP sync, secret-safe switching을 관리합니다.
 
 기존 로컬 설정은 되도록 덮어쓰지 않고, 누락된 기본값만 생성합니다. 실제 secret은
 이 저장소에 저장하지 않습니다.
@@ -23,7 +24,8 @@ Linux, WSL, Termux, Windows PowerShell 환경을 chezmoi로 관리하는 dotfile
 | 기본 shell | zsh, Oh My Zsh plugins, tmux, fzf, zoxide, uv, rustup, locale guard | `dot_zshrc`, `dot_tmux.conf`, `scripts/install.sh` |
 | Modern CLI | prebuilt release binary를 `~/.local/bin`에 설치, root 불필요 | `scripts/install/modern-cli.sh` |
 | Fonts | Linux, macOS, Windows, WSL host용 0xProto Nerd Font | `0xProto/`, font run-on-change scripts |
-| Windows | PowerShell profile hook 및 `cx`/`cc` helper | `Documents/PowerShell/Scripts/ai-env.ps1` |
+| cxcc | 고정 버전 cross-platform installer와 안정적인 shell loader | `.chezmoidata.toml`, `scripts/install/cxcc.*`, `run_before_10-install-cxcc.*.tmpl` |
+| Windows | cxcc를 로드하는 PowerShell profile과 호환 hook | `Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1`, `run_onchange_after_10-powershell-ai-env-hook.ps1.tmpl` |
 | AI profiles | Codex/Claude registry, health cache, state, default seed config | `dot_ai-env/`, `dot_codex/`, `dot_claude/` |
 | MCP | Claude Code와 Codex에 동기화되는 로컬 MCP registry | `~/.ai-env/mcp.toml`, `mcp` helper |
 | Secrets | 안전한 예시만 제공, 실제 key는 repo 밖에 저장 | `secret_examples/`, `~/.ai-secrets/secrets.toml` |
@@ -68,6 +70,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
+INSTALL_CXCC=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FONTS=0 bash ./bootstrap.sh
 INSTALL_WINDOWS_FONTS_FROM_WSL=0 bash ./bootstrap.sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
@@ -89,7 +92,7 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/
 - 호환 가능한 fastfetch를 `~/.local/bin`에 설치
 - 시스템 패키지 설치가 켜져 있으면 Node.js와 npm 설치
 - 현재 사용자 font 디렉터리에 0xProto Nerd Font 설치
-- Windows PowerShell용 `cx` / `cc` profile hook
+- 고정 버전 cxcc와 `cx`, `cc`, `mcp`를 로드하는 PowerShell/Zsh hook
 
 zsh가 없고 build tool이 있으면 zsh를 `~/.local`에 빌드합니다. 오래된 Linux에서는
 fastfetch polyfilled binary를 우선 사용하고, 맞는 binary가 없으면 전체 apply를
@@ -118,8 +121,10 @@ interactive alias는 보수적으로만 켭니다. `du` -> `dust`, `df` -> `duf`
 
 ## CX/CC AI Profile 도구
 
-Codex와 Claude Code의 로컬 상태를 전환하는 가벼운 shell function을 제공합니다.
-CLI를 직접 실행하지는 않습니다.
+dotfiles는 고정 버전 cxcc를 설치하고 가벼운 shell function으로 Codex와 Claude Code의
+로컬 상태를 전환합니다. CLI를 직접 실행하지는 않습니다. 명령 구현과 cross-platform
+test는 cxcc가, version pin, install hook, loader 연결, default user config는 이 repo가
+관리합니다.
 
 ```sh
 cx list
@@ -149,9 +154,15 @@ cc edit
 설치 위치:
 
 ```text
-Windows: ~/Documents/PowerShell/Scripts/ai-env.ps1
-Linux:   ~/.local/share/ai-env/ai-env.sh
+PowerShell: ~/.local/share/cxcc/load.ps1
+Bash/Zsh:  ~/.local/share/cxcc/load.sh
+Payload:   ~/.local/share/cxcc/versions/v0.1.0/
 ```
+
+release tag, immutable commit, installer digest, platform artifact digest는
+`.chezmoidata.toml`에 함께 있습니다. 대응하는 pin을 모두 갱신하고 `chezmoi apply`를
+실행하면 upgrade할 수 있습니다. `INSTALL_CXCC=0`은 설치를 건너뛰며, 변수를 제거한
+다음 apply부터 정상 설치가 다시 시작됩니다.
 
 상태 파일:
 
@@ -265,12 +276,13 @@ state, 로컬 MCP secret은 commit하지 않습니다.
 | `dot_zshrc` | `~/.zshrc` |
 | `dot_tmux.conf` | `~/.tmux.conf` |
 | `dot_config/fastfetch/*` | `~/.config/fastfetch/*` |
-| `dot_local/share/ai-env/ai-env.sh` | `~/.local/share/ai-env/ai-env.sh` |
+| `.chezmoidata.toml`, `scripts/install/cxcc.*` | 고정 cxcc release를 `~/.local/share/cxcc`에 설치 |
 | `dot_ai-env/create_profiles.json` | `~/.ai-env/profiles.json` if missing |
 | `dot_codex/create_*.toml` | `~/.codex/*.toml` if missing |
 | `dot_claude/create_settings.json` | `~/.claude/settings.json` if missing |
-| `Documents/PowerShell/Scripts/ai-env.ps1` | Windows PowerShell helper |
+| `Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1` | `~/.local/share/cxcc/load.ps1`을 읽는 Windows profile |
 | `run_onchange_before_00-install-env.sh.tmpl` | installer hook |
+| `run_before_10-install-cxcc.*.tmpl` | 고정 cxcc install hook |
 | `run_after_99-smoke-test.sh.tmpl` | post-apply smoke hook |
 
 `create_` 파일은 누락된 설정만 seed하며 기존 머신 설정을 덮어쓰지 않습니다.
@@ -278,20 +290,13 @@ state, 로컬 MCP secret은 commit하지 않습니다.
 ## 검증
 
 ```powershell
-pwsh -NoProfile -File test/ai-env-smoke.ps1 -SourceDir .
-pwsh -NoProfile -File test/ai-env-health.ps1 -SourceDir .
+pwsh -NoProfile -File test/cxcc-consumer-smoke.ps1
+pwsh -NoProfile -File test/powershell-profile-smoke.ps1 -SourceDir .
 ```
 
 ```sh
-bash -n dot_local/share/ai-env/ai-env.sh
-node --check dot_local/share/ai-env/ai-health.mjs
-bash test/ai-env-smoke.sh
-```
-
-로컬 Claude Docker 컨테이너에서 Linux 검증:
-
-```sh
-docker compose exec -T claude bash -lc 'cd /workspace/CodeX_desk/dotfiles && chezmoi apply --force -- "$HOME/.local" && source "$HOME/.local/share/ai-env/ai-env.sh" && bash test/ai-env-smoke.sh'
+bash -n scripts/install/cxcc.sh test/cxcc-consumer-smoke.sh
+bash test/cxcc-consumer-smoke.sh
 ```
 
 ## AI-assisted Maintenance

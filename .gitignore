@@ -6,3 +6,17 @@
 /secrets/
 *.secret
 *.secret.*
+
+# Local agent planning and migration artifacts are not part of the public product.
+/task_plan.md
+/findings.md
+/progress.md
+/HANDOFF.md
+/HANDOVER.md
+/migration-log.md
+/migration-inventory.md
+/migration-diary.md
+/machine-snapshot.md
+/BASELINE.md
+/COPY_HASHES.md
+/docs/superpowers/

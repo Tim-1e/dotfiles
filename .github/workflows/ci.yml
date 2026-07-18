@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   linux-quick:
     name: Linux Quick Checks
@@ -13,6 +16,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check public repository hygiene
+        shell: bash
+        run: |
+          forbidden='(^|/)[^/]*(task_plan|findings|progress|handoff|handover|migration[-_](log|inventory|diary)|machine[-_]snapshot|baseline|copy[-_]hash(es)?)[^/]*$|^docs/superpowers/'
+          if git ls-files | grep -Eqi "$forbidden"; then
+            echo "Internal planning material is tracked in the public repository." >&2
+            exit 1
+          fi
+          windows_root='[A-Z]:\\'
+          windows_user='Users\\'
+          windows_workspace='CodeX_desk\\'
+          unix_root='/(Users|home)'
+          unix_tail='/[^/]+/'
+          workspace_name='CodeX_desk'
+          unix_workspace="/([^/]+/)*${workspace_name}/"
+          machine_paths="(${windows_root}(${windows_user}|${windows_workspace})|${unix_root}${unix_tail}|${unix_workspace})"
+          if git grep -nE "$machine_paths" -- ':!*.lock'; then
+            echo "Machine-specific absolute path found in tracked content." >&2
+            exit 1
+          fi
 
       - name: Check shell syntax
         run: |
@@ -27,13 +53,14 @@ jobs:
             scripts/install/modern-cli.sh \
             scripts/install/fastfetch.sh \
             scripts/install/fonts.sh \
+            scripts/install/cxcc.sh \
             test/smoke.sh \
             test/fonts-smoke.sh \
-            test/ai-env-smoke.sh \
+            test/cxcc-consumer-smoke.sh \
             test/termux-platform-smoke.sh
 
-      - name: Test AI env shell helpers
-        run: ./test/ai-env-smoke.sh
+      - name: Test cxcc consumer
+        run: ./test/cxcc-consumer-smoke.sh
 
       - name: Test font install
         run: |
@@ -50,13 +77,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Apply dotfiles from bootstrap
+      - name: Apply dotfiles with cxcc skipped
         env:
           DOTFILES_USE_SUDO: "1"
           INSTALL_CLAUDE: "0"
+          INSTALL_CXCC: "0"
           INSTALL_WINDOWS_FONTS_FROM_WSL: "0"
-        run: bash ./bootstrap.sh
+        run: |
+          bash ./bootstrap.sh
+          test ! -e "$HOME/.local/share/cxcc"
+
+      - name: Install pinned cxcc and verify repeat apply
+        run: |
+          profiles_before="$(sha256sum "$HOME/.ai-env/profiles.json" | awk '{print $1}')"
+          chezmoi apply --source "$GITHUB_WORKSPACE"
+          current_before="$(sha256sum "$HOME/.local/share/cxcc/current.json" | awk '{print $1}')"
+          chezmoi apply --source "$GITHUB_WORKSPACE"
+          profiles_after="$(sha256sum "$HOME/.ai-env/profiles.json" | awk '{print $1}')"
+          current_after="$(sha256sum "$HOME/.local/share/cxcc/current.json" | awk '{print $1}')"
+          test "$profiles_before" = "$profiles_after"
+          test "$current_before" = "$current_after"
 
       - name: Run full smoke check
         env:
@@ -69,6 +112,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check shell syntax
         run: |
@@ -83,17 +128,18 @@ jobs:
             scripts/install/modern-cli.sh \
             scripts/install/fastfetch.sh \
             scripts/install/fonts.sh \
+            scripts/install/cxcc.sh \
             test/smoke.sh \
             test/fonts-smoke.sh \
-            test/ai-env-smoke.sh
+            test/cxcc-consumer-smoke.sh
 
       - name: Test font install
         run: |
           ./scripts/install/fonts.sh
           ./test/fonts-smoke.sh
 
-      - name: Test AI env shell helpers
-        run: ./test/ai-env-smoke.sh
+      - name: Test cxcc consumer
+        run: ./test/cxcc-consumer-smoke.sh
 
   windows-quick:
     name: Windows Quick Checks
@@ -104,6 +150,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check PowerShell syntax
         run: |
@@ -111,13 +159,11 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/fonts-windows.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/powershell-profile-deps.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("scripts/install/cxcc.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("bootstrap.ps1", [ref]$tokens, [ref]$errors) | Out-Null
-          [System.Management.Automation.Language.Parser]::ParseFile("Documents/PowerShell/Scripts/ai-env.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/fonts-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
-          [System.Management.Automation.Language.Parser]::ParseFile("test/ai-env-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
-          [System.Management.Automation.Language.Parser]::ParseFile("test/codex-provider-bridge.ps1", [ref]$tokens, [ref]$errors) | Out-Null
-          [System.Management.Automation.Language.Parser]::ParseFile("test/codex-app-bridge-management.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile("test/cxcc-consumer-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/powershell-profile-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           [System.Management.Automation.Language.Parser]::ParseFile("test/windows-full-smoke.ps1", [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) {
@@ -125,13 +171,8 @@ jobs:
             exit 1
           }
 
-      - name: Test AI env PowerShell helpers
-        run: ./test/ai-env-smoke.ps1 -SourceDir "$PWD"
-
-      - name: Test Codex App provider bridge
-        run: |
-          ./test/codex-provider-bridge.ps1 -SourceDir "$PWD"
-          ./test/codex-app-bridge-management.ps1 -SourceDir "$PWD"
+      - name: Test cxcc consumer
+        run: ./test/cxcc-consumer-smoke.ps1
 
       - name: Test PowerShell profile load
         run: ./test/powershell-profile-smoke.ps1 -SourceDir "$PWD"
@@ -151,9 +192,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Apply dotfiles from bootstrap
-        run: ./bootstrap.ps1 -SourceDir "$PWD"
+      - name: Apply dotfiles with cxcc skipped
+        env:
+          INSTALL_CXCC: "0"
+        run: |
+          ./bootstrap.ps1 -SourceDir "$PWD"
+          if (Test-Path -LiteralPath (Join-Path $HOME ".local\share\cxcc")) {
+            throw "INSTALL_CXCC=0 unexpectedly installed cxcc."
+          }
+
+      - name: Install pinned cxcc and verify repeat apply
+        run: |
+          $profilesPath = Join-Path $HOME ".ai-env\profiles.json"
+          $currentPath = Join-Path $HOME ".local\share\cxcc\current.json"
+          $profilesBefore = (Get-FileHash -LiteralPath $profilesPath -Algorithm SHA256).Hash
+          chezmoi apply --source "$PWD"
+          $currentBefore = (Get-FileHash -LiteralPath $currentPath -Algorithm SHA256).Hash
+          chezmoi apply --source "$PWD"
+          $profilesAfter = (Get-FileHash -LiteralPath $profilesPath -Algorithm SHA256).Hash
+          $currentAfter = (Get-FileHash -LiteralPath $currentPath -Algorithm SHA256).Hash
+          if ($profilesBefore -cne $profilesAfter) { throw "cxcc install changed profiles.json." }
+          if ($currentBefore -cne $currentAfter) { throw "Repeated cxcc apply changed current.json." }
 
       - name: Run full Windows smoke check
         run: ./test/windows-full-smoke.ps1 -SourceDir "$PWD"

@@ -1,0 +1,14 @@
+{{- if ne .chezmoi.os "windows" -}}
+{{ if eq .chezmoi.os "android" -}}
+#!{{ env "PREFIX" }}/bin/bash
+{{- else -}}
+#!/usr/bin/env bash
+{{- end }}
+set -Eeuo pipefail
+
+bash "{{ .chezmoi.sourceDir }}/scripts/install/cxcc.sh" \
+  "{{ .cxcc.version }}" \
+  "{{ .cxcc.commit }}" \
+  "{{ .cxcc.installerShellSha256 }}" \
+  "{{ .cxcc.posixArtifactSha256 }}"
+{{- end -}}

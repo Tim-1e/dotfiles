@@ -1,0 +1,7 @@
+[cxcc]
+version = "v0.1.0"
+commit = "dfc0bd6ef4b6aafdafff5f6d732e28cc52cfcfc0"
+installerPowerShellSha256 = "40a116c2f83a25590ed9d1d74120354c00254ed719e1adda25c429282d57f54e"
+installerShellSha256 = "ce6e0712c6a2c0439c334bf849b71fe618a6c296477bc25a447ede47f07e4eb7"
+windowsArtifactSha256 = "f8fde14b05170a635d5837650fe587ba96dcdd1164d6f3e2706497a13beced5f"
+posixArtifactSha256 = "6ac428ce3002d6e7be8f92b26b69c172380363cdfeb8f588278f7577d06958bd"

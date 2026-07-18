@@ -37,12 +37,19 @@ function Assert-Contains {
 Assert-Command -Name "chezmoi"
 
 $profilePath = $PROFILE.CurrentUserCurrentHost
-$aiEnvPath = Join-Path $HOME "Documents\PowerShell\Scripts\ai-env.ps1"
+$cxccRoot = if ($env:CXCC_HOME) { [Environment]::ExpandEnvironmentVariables($env:CXCC_HOME) } else { Join-Path $HOME ".local\share\cxcc" }
+$currentPath = Join-Path $cxccRoot "current.json"
 $registryPath = Join-Path $HOME ".ai-env\profiles.json"
 $codexHome = Join-Path $HOME ".codex"
 
 Assert-File -Path $profilePath
-Assert-File -Path $aiEnvPath
+Assert-File -Path (Join-Path $cxccRoot ".cxcc-root")
+Assert-File -Path $currentPath
+Assert-File -Path (Join-Path $cxccRoot "load.ps1")
+Assert-File -Path (Join-Path $cxccRoot "load.sh")
+$current = Get-Content -LiteralPath $currentPath -Raw | ConvertFrom-Json
+if ([string]$current.version -notmatch '^v\d+\.\d+\.\d+') { throw "Installed cxcc version metadata is invalid." }
+Assert-File -Path (Join-Path $cxccRoot "versions\$($current.version)\VERSION")
 Assert-File -Path $registryPath
 Assert-File -Path (Join-Path $codexHome "config.toml")
 Assert-File -Path (Join-Path $codexHome "sub.config.toml")
@@ -52,7 +59,7 @@ Assert-File -Path (Join-Path $codexHome "app-auth\codex-app-token.ps1")
 Assert-File -Path (Join-Path $HOME ".claude\settings.json")
 
 Assert-Contains -Path $profilePath -Pattern "chezmoi-ai-env begin" -Message "PowerShell profile is missing the ai-env begin marker."
-Assert-Contains -Path $profilePath -Pattern "Scripts\\ai-env\.ps1" -Message "PowerShell profile does not load Scripts\ai-env.ps1."
+Assert-Contains -Path $profilePath -Pattern "load\.ps1" -Message "PowerShell profile does not load the stable cxcc loader."
 
 & (Join-Path $SourceDir "test\fonts-smoke.ps1") -SourceDir (Join-Path $SourceDir "0xProto")
 

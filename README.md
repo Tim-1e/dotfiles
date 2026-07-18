@@ -11,9 +11,9 @@ PowerShell. The repo focuses on three layers:
   cross-platform bootstrap behavior.
 - **Modern CLI tools**: user-level installs of fast daily tools such as `rg`,
   `fd`, `jq`, `yq`, `delta`, `dust`, `duf`, `xh`, and `btop`.
-- **AI workspace tools**: `cx`, `cc`, and `mcp` helpers for local Codex,
-  Claude Code, API-router profiles, health checks, MCP sync, and secret-safe
-  switching.
+- **AI workspace tools**: a pinned [cxcc](https://github.com/Tim-1e/cxcc)
+  release provides `cx`, `cc`, and `mcp` for local Codex, Claude Code,
+  API-router profiles, health checks, MCP sync, and secret-safe switching.
 
 The dotfiles create missing defaults, but they avoid overwriting existing
 machine-local settings. Secrets are never stored in this repository.
@@ -25,7 +25,8 @@ machine-local settings. Secrets are never stored in this repository.
 | Base shell | zsh, Oh My Zsh plugins, tmux, fzf, zoxide, uv, rustup, locale guards | `dot_zshrc`, `dot_tmux.conf`, `scripts/install.sh` |
 | Modern CLI | release-binary installs into `~/.local/bin`, best-effort and no root required | `scripts/install/modern-cli.sh` |
 | Fonts | 0xProto Nerd Font for Linux, macOS, Windows, and WSL host installs | `0xProto/`, font run-on-change scripts |
-| Windows | PowerShell profile hook and `cx`/`cc` helper script | `Documents/PowerShell/Scripts/ai-env.ps1` |
+| cxcc | Pinned cross-platform installer and stable shell loaders | `.chezmoidata.toml`, `scripts/install/cxcc.*`, `run_before_10-install-cxcc.*.tmpl` |
+| Windows | PowerShell profile and compatibility hook that load cxcc | `Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1`, `run_onchange_after_10-powershell-ai-env-hook.ps1.tmpl` |
 | AI profiles | Codex/Claude profile registry, health cache, local state, default seed files | `dot_ai-env/`, `dot_codex/`, `dot_claude/` |
 | MCP | Single local MCP registry, sync/pull helpers for Claude Code and Codex | `~/.ai-env/mcp.toml`, `mcp` helper |
 | Secrets | Example templates only; real keys stay outside git | `secret_examples/`, `~/.ai-secrets/secrets.toml` |
@@ -70,6 +71,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
+INSTALL_CXCC=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FONTS=0 bash ./bootstrap.sh
 INSTALL_WINDOWS_FONTS_FROM_WSL=0 bash ./bootstrap.sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
@@ -92,7 +94,8 @@ The base layer installs or configures:
 - latest compatible fastfetch in `~/.local/bin`
 - Node.js and npm by default when system package installation is enabled
 - 0xProto Nerd Fonts in the current user's font directory
-- Windows PowerShell profile hooks for `cx` and `cc`
+- a pinned cxcc release plus PowerShell/Zsh loader hooks for `cx`, `cc`, and
+  `mcp`
 
 If `zsh` is unavailable but build tools are present, zsh is built into
 `~/.local`. On older Linux systems, fastfetch falls back to its polyfilled
@@ -121,8 +124,11 @@ over standard commands.
 
 ## CX/CC AI Profile Tools
 
-The repo ships lightweight shell functions for switching local Codex and Claude
-Code state without launching either CLI:
+The dotfiles install a pinned cxcc release, then load its lightweight shell
+functions for switching local Codex and Claude Code state without launching
+either CLI. cxcc owns the command implementation and its cross-platform tests;
+this repo owns the version pin, installation hook, loader wiring, and default
+user configuration.
 
 ```sh
 cx list
@@ -152,9 +158,15 @@ cc edit
 Installed helper locations:
 
 ```text
-Windows: ~/Documents/PowerShell/Scripts/ai-env.ps1
-Linux:   ~/.local/share/ai-env/ai-env.sh
+PowerShell: ~/.local/share/cxcc/load.ps1
+Bash/Zsh:  ~/.local/share/cxcc/load.sh
+Payload:   ~/.local/share/cxcc/versions/v0.1.0/
 ```
+
+The release tag, immutable commit, installer digest, and platform artifact
+digests are stored together in `.chezmoidata.toml`. Update all matching pins
+and run `chezmoi apply` to upgrade. Set `INSTALL_CXCC=0` to skip the install
+hook; a later apply without the variable resumes normal installation.
 
 Runtime state:
 
@@ -273,12 +285,13 @@ OAuth files, generated auth state, or local MCP secrets.
 | `dot_zshrc` | `~/.zshrc` |
 | `dot_tmux.conf` | `~/.tmux.conf` |
 | `dot_config/fastfetch/*` | `~/.config/fastfetch/*` |
-| `dot_local/share/ai-env/ai-env.sh` | `~/.local/share/ai-env/ai-env.sh` |
+| `.chezmoidata.toml`, `scripts/install/cxcc.*` | pinned cxcc release under `~/.local/share/cxcc` |
 | `dot_ai-env/create_profiles.json` | `~/.ai-env/profiles.json` if missing |
 | `dot_codex/create_*.toml` | `~/.codex/*.toml` if missing |
 | `dot_claude/create_settings.json` | `~/.claude/settings.json` if missing |
-| `Documents/PowerShell/Scripts/ai-env.ps1` | Windows PowerShell helper |
+| `Documents/PowerShell/create_Microsoft.PowerShell_profile.ps1` | Windows profile that loads `~/.local/share/cxcc/load.ps1` |
 | `run_onchange_before_00-install-env.sh.tmpl` | installer hook |
+| `run_before_10-install-cxcc.*.tmpl` | pinned cxcc install hooks |
 | `run_after_99-smoke-test.sh.tmpl` | post-apply smoke hook |
 
 Files prefixed with `create_` seed missing local config only. Existing machine
@@ -287,20 +300,13 @@ settings are left in place.
 ## Validation
 
 ```powershell
-pwsh -NoProfile -File test/ai-env-smoke.ps1 -SourceDir .
-pwsh -NoProfile -File test/ai-env-health.ps1 -SourceDir .
+pwsh -NoProfile -File test/cxcc-consumer-smoke.ps1
+pwsh -NoProfile -File test/powershell-profile-smoke.ps1 -SourceDir .
 ```
 
 ```sh
-bash -n dot_local/share/ai-env/ai-env.sh
-node --check dot_local/share/ai-env/ai-health.mjs
-bash test/ai-env-smoke.sh
-```
-
-Docker/Linux validation in the local Claude container:
-
-```sh
-docker compose exec -T claude bash -lc 'cd /workspace/CodeX_desk/dotfiles && chezmoi apply --force -- "$HOME/.local" && source "$HOME/.local/share/ai-env/ai-env.sh" && bash test/ai-env-smoke.sh'
+bash -n scripts/install/cxcc.sh test/cxcc-consumer-smoke.sh
+bash test/cxcc-consumer-smoke.sh
 ```
 
 ## AI-Assisted Maintenance
