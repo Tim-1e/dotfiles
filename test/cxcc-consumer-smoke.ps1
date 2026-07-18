@@ -207,3 +207,7 @@ $loader = @(
   Remove-Variable -Name CXCC_CONSUMER_TEST_LOADER_COUNT -Scope Global -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
+# GitHub Actions propagates the most recent native exit code after dot-sourcing
+# the step script. Expected failing probes above must not mask a successful test.
+$global:LASTEXITCODE = 0
