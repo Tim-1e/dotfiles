@@ -46,11 +46,11 @@ alias cls="clear"
 alias deact="deactivate"
 
 if command -v eza >/dev/null 2>&1; then
-  alias ls='eza --icons'
-  alias ll='eza -la --icons --git'
-  alias la='eza -a --icons'
-  alias lt='eza --tree --level=2 --icons'
-  alias llt='eza --tree --level=3 --icons --git'
+  alias ls='eza --icons=auto'
+  alias ll='eza -la --icons=auto --git'
+  alias la='eza -a --icons=auto'
+  alias lt='eza --tree --level=2 --icons=auto'
+  alias llt='eza --tree --level=3 --icons=auto --git'
 fi
 
 if command -v bat >/dev/null 2>&1; then
