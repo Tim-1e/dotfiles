@@ -68,7 +68,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
-INSTALL_CXCC=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
+INSTALL_CXCC=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FONTS=0 bash ./bootstrap.sh
 INSTALL_WINDOWS_FONTS_FROM_WSL=0 bash ./bootstrap.sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
@@ -89,7 +89,7 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/
 - 兼容的 fastfetch 到 `~/.local/bin`
 - Node.js 和 npm，默认随系统包安装
 - 0xProto Nerd Font 到当前用户字体目录
-- 固定版本的 cxcc，以及加载 `cx`、`cc`、`mcp` 的 PowerShell/Zsh hook
+- 选择安装时提供固定版本的 cxcc，以及加载 `cx`、`cc`、`mcp` 的 PowerShell/Zsh hook
 
 如果系统没有 zsh，但有编译工具，脚本会把 zsh 编译到 `~/.local`。老 Linux
 系统上，fastfetch 会优先尝试 polyfilled binary；没有合适版本时跳过，不让整个
@@ -116,7 +116,7 @@ apply 失败。
 
 ## CX/CC AI Profile 工具
 
-dotfiles 安装固定版本的 cxcc，再加载其轻量 shell function，用于切换 Codex 和
+dotfiles 可安装固定版本的 cxcc，再加载其轻量 shell function，用于切换 Codex 和
 Claude Code 的本地状态，但不会直接启动 CLI。命令实现和跨平台测试归 cxcc 仓库
 维护；本仓库只负责版本钉住、安装 hook、loader 接线和默认用户配置：
 
@@ -154,8 +154,9 @@ Payload:   ~/.local/share/cxcc/versions/v0.1.0/
 ```
 
 release tag、不可变 commit、installer digest 和平台 artifact digest 统一位于
-`.chezmoidata.toml`；同步更新这些 pin 后运行 `chezmoi apply` 即可升级。设置
-`INSTALL_CXCC=0` 会跳过安装，之后取消变量再 apply 即可恢复。
+`.chezmoidata.toml`。cxcc 默认不安装；交互 apply 会询问
+`Install the cx/cc environment? [y/N]`，直接回车即跳过。非交互安装设置
+`INSTALL_CXCC=1`，需要无提示跳过时设置 `INSTALL_CXCC=0`。
 
 运行状态：
 

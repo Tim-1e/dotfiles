@@ -91,6 +91,8 @@ jobs:
           test ! -e "$HOME/.local/share/cxcc"
 
       - name: Install pinned cxcc and verify repeat apply
+        env:
+          INSTALL_CXCC: "1"
         run: |
           profiles_before="$(sha256sum "$HOME/.ai-env/profiles.json" | awk '{print $1}')"
           chezmoi apply --source "$GITHUB_WORKSPACE"
@@ -104,6 +106,7 @@ jobs:
       - name: Run full smoke check
         env:
           DOTFILES_SOURCE_DIR: ${{ github.workspace }}
+          INSTALL_CXCC: "1"
         run: bash ./test/smoke.sh
 
   macos:
@@ -205,6 +208,8 @@ jobs:
           }
 
       - name: Install pinned cxcc and verify repeat apply
+        env:
+          INSTALL_CXCC: "1"
         run: |
           $profilesPath = Join-Path $HOME ".ai-env\profiles.json"
           $currentPath = Join-Path $HOME ".local\share\cxcc\current.json"
@@ -218,4 +223,6 @@ jobs:
           if ($currentBefore -cne $currentAfter) { throw "Repeated cxcc apply changed current.json." }
 
       - name: Run full Windows smoke check
+        env:
+          INSTALL_CXCC: "1"
         run: ./test/windows-full-smoke.ps1 -SourceDir "$PWD"

@@ -22,8 +22,26 @@ foreach ($digest in @($InstallerSha256, $ArtifactSha256)) {
   if ($digest -notmatch '^[0-9a-f]{64}$') { throw "cxcc SHA-256 pins must contain 64 lowercase hexadecimal characters." }
 }
 
-if ($env:INSTALL_CXCC -ceq "0") {
-  Write-Host "Skipping cxcc installation because INSTALL_CXCC=0."
+if ([string]::IsNullOrEmpty($env:INSTALL_CXCC)) {
+  $shouldInstall = $false
+  if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+    try {
+      $answer = Read-Host "Install the cx/cc environment? [y/N]"
+      $shouldInstall = ([string]$answer).Trim() -match '^(?i:y|yes)$'
+    } catch {
+      $shouldInstall = $false
+    }
+  }
+} elseif ($env:INSTALL_CXCC -ceq "1") {
+  $shouldInstall = $true
+} elseif ($env:INSTALL_CXCC -ceq "0") {
+  $shouldInstall = $false
+} else {
+  throw "INSTALL_CXCC must be 0 or 1."
+}
+
+if (-not $shouldInstall) {
+  Write-Host "Skipping cxcc installation. Set INSTALL_CXCC=1 to install it."
   return
 }
 

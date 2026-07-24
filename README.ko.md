@@ -70,7 +70,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
-INSTALL_CXCC=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
+INSTALL_CXCC=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FONTS=0 bash ./bootstrap.sh
 INSTALL_WINDOWS_FONTS_FROM_WSL=0 bash ./bootstrap.sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
@@ -92,7 +92,7 @@ DOTFILES_USE_SUDO=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/
 - 호환 가능한 fastfetch를 `~/.local/bin`에 설치
 - 시스템 패키지 설치가 켜져 있으면 Node.js와 npm 설치
 - 현재 사용자 font 디렉터리에 0xProto Nerd Font 설치
-- 고정 버전 cxcc와 `cx`, `cc`, `mcp`를 로드하는 PowerShell/Zsh hook
+- 선택 시 고정 버전 cxcc와 `cx`, `cc`, `mcp`를 로드하는 PowerShell/Zsh hook
 
 zsh가 없고 build tool이 있으면 zsh를 `~/.local`에 빌드합니다. 오래된 Linux에서는
 fastfetch polyfilled binary를 우선 사용하고, 맞는 binary가 없으면 전체 apply를
@@ -121,7 +121,7 @@ interactive alias는 보수적으로만 켭니다. `du` -> `dust`, `df` -> `duf`
 
 ## CX/CC AI Profile 도구
 
-dotfiles는 고정 버전 cxcc를 설치하고 가벼운 shell function으로 Codex와 Claude Code의
+dotfiles는 고정 버전 cxcc를 선택하여 설치하고 가벼운 shell function으로 Codex와 Claude Code의
 로컬 상태를 전환합니다. CLI를 직접 실행하지는 않습니다. 명령 구현과 cross-platform
 test는 cxcc가, version pin, install hook, loader 연결, default user config는 이 repo가
 관리합니다.
@@ -160,9 +160,10 @@ Payload:   ~/.local/share/cxcc/versions/v0.1.0/
 ```
 
 release tag, immutable commit, installer digest, platform artifact digest는
-`.chezmoidata.toml`에 함께 있습니다. 대응하는 pin을 모두 갱신하고 `chezmoi apply`를
-실행하면 upgrade할 수 있습니다. `INSTALL_CXCC=0`은 설치를 건너뛰며, 변수를 제거한
-다음 apply부터 정상 설치가 다시 시작됩니다.
+`.chezmoidata.toml`에 함께 있습니다. cxcc는 기본적으로 설치하지 않습니다.
+interactive apply는 `Install the cx/cc environment? [y/N]`라고 묻고 Enter를 누르면
+건너뜁니다. non-interactive 설치에는 `INSTALL_CXCC=1`, 질문 없이 건너뛰려면
+`INSTALL_CXCC=0`을 설정합니다.
 
 상태 파일:
 

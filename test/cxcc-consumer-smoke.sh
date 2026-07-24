@@ -44,7 +44,9 @@ grep -Fq '.cxcc.posixArtifactSha256' "$HOOK" || fail "Shell hook does not use th
 grep -Fq -- '--connect-timeout' "$INSTALLER" || fail "Shell consumer download has no connection timeout."
 grep -Fq -- '--max-time' "$INSTALLER" || fail "Shell consumer download has no total timeout."
 grep -Fq -- '--ipv4' "$INSTALLER" || fail "Shell consumer download has no IPv4 fallback."
-grep -Fq 'INSTALL_CXCC' "$FULL_SMOKE" || fail "Full smoke does not honor INSTALL_CXCC=0."
+grep -Fq 'Install the cx/cc environment? [y/N]' "$INSTALLER" || fail "Shell installer does not offer the default-No cx/cc prompt."
+grep -Fq 'INSTALL_CXCC=1' "$INSTALLER" || fail "Shell installer does not support INSTALL_CXCC=1."
+grep -Fq '${INSTALL_CXCC:-0}' "$FULL_SMOKE" || fail "Full smoke does not default cxcc checks to disabled."
 grep -Fq 'CXCC_HOME' "$ZSHRC" || fail "Zsh profile does not honor CXCC_HOME."
 grep -Fq '/load.sh' "$ZSHRC" || fail "Zsh profile does not load the stable cxcc loader."
 ! grep -Fq '.local/share/ai-env/ai-env.sh' "$ZSHRC" || fail "Zsh profile still loads the legacy ai-env implementation."
@@ -180,7 +182,13 @@ run_installer() {
   bash "$INSTALLER" "$EXPECTED_VERSION" "$test_commit" "$test_installer_sha256" "$test_artifact_sha256"
 }
 
+unset INSTALL_CXCC
 run_installer
+[ ! -e "$install_root" ] || fail "Unset INSTALL_CXCC installed cxcc in a non-interactive session."
+[ ! -e "$curl_log" ] || fail "Unset INSTALL_CXCC accessed the network in a non-interactive session."
+assert_state_preserved
+
+INSTALL_CXCC=1 run_installer
 [ "$(sed -n '1p' "$curl_log")" = "https://raw.githubusercontent.com/Tim-1e/cxcc/$test_commit/install.sh" ] || fail "Shell consumer used a mutable installer URL."
 [ "$(sed -n '2p' "$curl_log")" = "https://github.com/Tim-1e/cxcc/releases/download/$EXPECTED_VERSION/cxcc-$EXPECTED_VERSION-posix.tar.gz" ] || fail "Shell consumer used an unexpected artifact URL."
 grep -Eq "^--version $EXPECTED_VERSION --artifact .*/cxcc-$EXPECTED_VERSION-posix\.tar\.gz --sha256 $test_artifact_sha256$" "$install_log" || fail "Shell consumer passed unexpected installer arguments."
@@ -189,12 +197,12 @@ grep -Fq '"version":"v0.1.0"' "$install_root/current.json" || fail "Shell consum
 [ "$(cat "$install_root/versions/$EXPECTED_VERSION/VERSION")" = "$EXPECTED_VERSION" ] || fail "Shell consumer payload VERSION is invalid."
 assert_state_preserved
 
-run_installer
+INSTALL_CXCC=1 run_installer
 [ "$(wc -l <"$curl_log" | tr -d ' ')" = "2" ] || fail "Repeated Shell apply downloaded cxcc again."
 assert_state_preserved
 
 rm "$install_root/versions/$EXPECTED_VERSION/src/shell/cxcc.sh"
-run_installer
+INSTALL_CXCC=1 run_installer
 [ "$(wc -l <"$curl_log" | tr -d ' ')" = "4" ] || fail "Shell consumer ignored a damaged cxcc payload."
 assert_state_preserved
 
@@ -204,11 +212,16 @@ INSTALL_CXCC=0 run_installer
 [ "$(wc -l <"$curl_log" | tr -d ' ')" = "4" ] || fail "INSTALL_CXCC=0 accessed the network."
 assert_state_preserved
 
+if INSTALL_CXCC=yes run_installer >/dev/null 2>&1; then
+  fail "Shell consumer accepted INSTALL_CXCC other than 0 or 1."
+fi
+[ "$(wc -l <"$curl_log" | tr -d ' ')" = "4" ] || fail "Invalid INSTALL_CXCC accessed the network."
+
 if HOME="$test_home" CXCC_HOME="$install_root" PATH="$fake_bin:$PATH" bash "$INSTALLER" main "$test_commit" "$test_installer_sha256" "$test_artifact_sha256" >/dev/null 2>&1; then
   fail "Shell consumer accepted an unpinned version."
 fi
 
-if HOME="$test_home" \
+if INSTALL_CXCC=1 HOME="$test_home" \
   CXCC_HOME="$test_home/bad/cxcc" \
   CXCC_TEST_CURL_LOG="$curl_log" \
   CXCC_TEST_INSTALL_LOG="$install_log" \
