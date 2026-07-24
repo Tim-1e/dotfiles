@@ -70,7 +70,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
-INSTALL_CXCC=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
+INSTALL_CXCC=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FONTS=0 bash ./bootstrap.sh
 INSTALL_WINDOWS_FONTS_FROM_WSL=0 bash ./bootstrap.sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
@@ -92,7 +92,8 @@ sudo にパスワードが必要な場合は確認し、デフォルトでは使
 - 互換性のある fastfetch を `~/.local/bin` へ
 - システムパッケージが有効な場合は Node.js と npm
 - 現在ユーザーの font directory へ 0xProto Nerd Font
-- 固定バージョンの cxcc と、`cx`、`cc`、`mcp` を読み込む PowerShell/Zsh hook
+- 選択した場合、固定バージョンの cxcc と `cx`、`cc`、`mcp` を読み込む
+  PowerShell/Zsh hook
 
 zsh がなく build tools がある場合は、zsh を `~/.local` にビルドします。
 古い Linux では fastfetch の polyfilled binary を優先し、適合するものがなければ
@@ -121,7 +122,7 @@ flag が互換ではない `rg`、`fd`、`sd`、`jq`、`yq`、`xh`、`delta` は
 
 ## CX/CC AI Profile ツール
 
-dotfiles は固定バージョンの cxcc をインストールし、その軽量 shell function で
+dotfiles は固定バージョンの cxcc を選択してインストールでき、その軽量 shell function で
 Codex と Claude Code のローカル状態を切り替えます。CLI 自体は起動しません。
 コマンド実装と cross-platform test は cxcc が、version pin、install hook、loader
 接続、default user config はこの repo が管理します。
@@ -160,9 +161,10 @@ Payload:   ~/.local/share/cxcc/versions/v0.1.0/
 ```
 
 release tag、immutable commit、installer digest、platform artifact digest は
-`.chezmoidata.toml` にまとめてあります。対応する pin をすべて更新して
-`chezmoi apply` を実行すると upgrade できます。`INSTALL_CXCC=0` で install を
-skip でき、変数を外した次回 apply で通常動作に戻ります。
+`.chezmoidata.toml` にまとめてあります。cxcc はデフォルトではインストールされません。
+interactive apply は `Install the cx/cc environment? [y/N]` と確認し、Enter では
+skip します。non-interactive install には `INSTALL_CXCC=1`、確認なしで skip する
+場合は `INSTALL_CXCC=0` を設定します。
 
 状態ファイル:
 

@@ -22,6 +22,7 @@ foreach ($required in @($installer, $hook, $dataFile, $profileSource)) {
 $dataText = Get-Content -LiteralPath $dataFile -Raw
 $hookText = Get-Content -LiteralPath $hook -Raw
 $profileText = Get-Content -LiteralPath $profileSource -Raw
+$installerText = Get-Content -LiteralPath $installer -Raw
 Assert-True ($dataText -match '(?m)^version = "v0\.1\.0"$') "dotfiles does not pin cxcc v0.1.0."
 Assert-True $dataText.Contains($expectedCommit) "dotfiles does not pin an immutable cxcc commit."
 Assert-True $dataText.Contains($expectedInstallerSha256) "dotfiles does not pin the PowerShell installer digest."
@@ -34,6 +35,8 @@ Assert-True $hookText.Contains(".cxcc.windowsArtifactSha256") "PowerShell hook d
 Assert-True ($profileText -match 'CXCC_HOME') "PowerShell profile does not honor CXCC_HOME."
 Assert-True ($profileText -match 'load\.ps1') "PowerShell profile does not load the stable cxcc loader."
 Assert-True ($profileText -notmatch 'Scripts\\ai-env\.ps1') "PowerShell profile still loads the legacy ai-env implementation."
+Assert-True $installerText.Contains("Install the cx/cc environment? [y/N]") "PowerShell installer does not offer the default-No cx/cc prompt."
+Assert-True ($installerText -match 'INSTALL_CXCC.+1') "PowerShell installer does not support INSTALL_CXCC=1."
 
 $legacyPaths = @(
   "Documents/PowerShell/Scripts/ai-env.ps1",
@@ -151,6 +154,12 @@ $loader = @(
   Remove-Item -LiteralPath Env:\INSTALL_CXCC -ErrorAction SilentlyContinue
 
   & $installer @installerArguments
+  Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Unset INSTALL_CXCC installed cxcc in a non-interactive session."
+  Assert-True (-not (Test-Path -LiteralPath $downloadLog)) "Unset INSTALL_CXCC accessed the network in a non-interactive session."
+  Assert-StatePreserved
+
+  $env:INSTALL_CXCC = "1"
+  & $installer @installerArguments
   $downloadLines = @(Get-Content -LiteralPath $downloadLog)
   Assert-True ($downloadLines.Count -eq 2) "PowerShell consumer did not download the installer and artifact exactly once."
   Assert-True ($downloadLines[0] -ceq "https://raw.githubusercontent.com/Tim-1e/cxcc/$testCommit/install.ps1") "PowerShell consumer used a mutable installer URL."
@@ -185,11 +194,17 @@ $loader = @(
   Assert-True (@(Get-Content -LiteralPath $downloadLog).Count -eq 4) "INSTALL_CXCC=0 accessed the network."
   Assert-StatePreserved
 
+  $env:INSTALL_CXCC = "yes"
+  $invalidInstallChoiceFailed = $false
+  try { & $installer @installerArguments } catch { $invalidInstallChoiceFailed = $true }
+  Assert-True $invalidInstallChoiceFailed "PowerShell consumer accepted INSTALL_CXCC other than 0 or 1."
+  Assert-True (@(Get-Content -LiteralPath $downloadLog).Count -eq 4) "Invalid INSTALL_CXCC accessed the network."
+
   $invalidVersionFailed = $false
   try { & $installer -Version "main" -Commit $testCommit -InstallerSha256 $testInstallerSha256 -ArtifactSha256 $testArtifactSha256 } catch { $invalidVersionFailed = $true }
   Assert-True $invalidVersionFailed "PowerShell consumer accepted an unpinned version."
 
-  Remove-Item -LiteralPath Env:\INSTALL_CXCC -ErrorAction SilentlyContinue
+  $env:INSTALL_CXCC = "1"
   $env:CXCC_HOME = Join-Path $testHome "bad\cxcc"
   $checksumFailed = $false
   try { & $installer -Version $expectedVersion -Commit $testCommit -InstallerSha256 ("0" * 64) -ArtifactSha256 $testArtifactSha256 } catch { $checksumFailed = $true }

@@ -71,7 +71,7 @@ INSTALL_CLAUDE=1 bash ./bootstrap.sh
 INSTALL_NODE=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FASTFETCH=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_MODERN_CLI=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
-INSTALL_CXCC=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
+INSTALL_CXCC=1 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
 INSTALL_FONTS=0 bash ./bootstrap.sh
 INSTALL_WINDOWS_FONTS_FROM_WSL=0 bash ./bootstrap.sh
 DOTFILES_USE_SUDO=0 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply Tim-1e/dotfiles
@@ -94,8 +94,8 @@ The base layer installs or configures:
 - latest compatible fastfetch in `~/.local/bin`
 - Node.js and npm by default when system package installation is enabled
 - 0xProto Nerd Fonts in the current user's font directory
-- a pinned cxcc release plus PowerShell/Zsh loader hooks for `cx`, `cc`, and
-  `mcp`
+- when selected, a pinned cxcc release plus PowerShell/Zsh loader hooks for
+  `cx`, `cc`, and `mcp`
 
 If `zsh` is unavailable but build tools are present, zsh is built into
 `~/.local`. On older Linux systems, fastfetch falls back to its polyfilled
@@ -124,7 +124,7 @@ over standard commands.
 
 ## CX/CC AI Profile Tools
 
-The dotfiles install a pinned cxcc release, then load its lightweight shell
+The dotfiles can install a pinned cxcc release, then load its lightweight shell
 functions for switching local Codex and Claude Code state without launching
 either CLI. cxcc owns the command implementation and its cross-platform tests;
 this repo owns the version pin, installation hook, loader wiring, and default
@@ -164,9 +164,10 @@ Payload:   ~/.local/share/cxcc/versions/v0.1.0/
 ```
 
 The release tag, immutable commit, installer digest, and platform artifact
-digests are stored together in `.chezmoidata.toml`. Update all matching pins
-and run `chezmoi apply` to upgrade. Set `INSTALL_CXCC=0` to skip the install
-hook; a later apply without the variable resumes normal installation.
+digests are stored together in `.chezmoidata.toml`. cxcc is not installed by
+default. An interactive apply asks `Install the cx/cc environment? [y/N]`;
+pressing Enter skips it. Set `INSTALL_CXCC=1` to install non-interactively or
+`INSTALL_CXCC=0` to skip without prompting.
 
 Runtime state:
 

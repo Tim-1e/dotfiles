@@ -29,8 +29,30 @@ sha256_file() {
 [[ "$installer_sha256" =~ ^[0-9a-f]{64}$ ]] || fail "cxcc installer SHA-256 pin must contain 64 lowercase hexadecimal characters."
 [[ "$artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || fail "cxcc artifact SHA-256 pin must contain 64 lowercase hexadecimal characters."
 
-if [ "${INSTALL_CXCC:-1}" = "0" ]; then
-  echo "Skipping cxcc installation because INSTALL_CXCC=0."
+case "${INSTALL_CXCC-}" in
+  1)
+    should_install=1
+    ;;
+  0)
+    should_install=0
+    ;;
+  "")
+    should_install=0
+    if [ -t 0 ] && [ -t 1 ]; then
+      printf 'Install the cx/cc environment? [y/N] '
+      IFS= read -r answer || answer=""
+      case "$answer" in
+        [Yy] | [Yy][Ee][Ss]) should_install=1 ;;
+      esac
+    fi
+    ;;
+  *)
+    fail "INSTALL_CXCC must be 0 or 1."
+    ;;
+esac
+
+if [ "$should_install" != "1" ]; then
+  echo "Skipping cxcc installation. Set INSTALL_CXCC=1 to install it."
   exit 0
 fi
 

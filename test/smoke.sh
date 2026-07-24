@@ -55,9 +55,9 @@ else
 fi
 
 bash "$SOURCE_DIR/test/fonts-smoke.sh"
-if [ "${INSTALL_CXCC:-1}" = "0" ]; then
-  echo "skipped cxcc smoke: INSTALL_CXCC=0" >&2
-else
+if [ "${INSTALL_CXCC:-0}" = "0" ]; then
+  echo "skipped cxcc smoke: INSTALL_CXCC is not enabled" >&2
+elif [ "$INSTALL_CXCC" = "1" ]; then
   bash "$SOURCE_DIR/test/cxcc-consumer-smoke.sh"
 
   cxcc_root="${CXCC_HOME:-$HOME/.local/share/cxcc}"
@@ -76,6 +76,9 @@ else
   cx help >/dev/null
   cc help >/dev/null
   mcp help >/dev/null
+else
+  echo "INSTALL_CXCC must be 0 or 1." >&2
+  exit 1
 fi
 
 FASTFETCH_OK=0
