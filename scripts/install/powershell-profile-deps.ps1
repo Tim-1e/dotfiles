@@ -24,7 +24,8 @@ if (-not (Get-Command Install-Module -ErrorAction SilentlyContinue)) {
 } else {
   Install-ProfileModule -Name "PSReadLine"
   Install-ProfileModule -Name "Terminal-Icons"
-  Install-ProfileModule -Name "Microsoft.WinGet.CommandNotFound"
+# Disabled 2026-09-30: Microsoft.WinGet.CommandNotFound blocks ~30s per shell start on offline servers (delays ssh exit).
+#   Install-ProfileModule -Name "Microsoft.WinGet.CommandNotFound"
 }
 
 if (-not (Get-Command oh-my-posh -ErrorAction SilentlyContinue)) {

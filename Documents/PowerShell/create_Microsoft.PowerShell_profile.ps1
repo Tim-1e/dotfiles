@@ -12,9 +12,10 @@ if (-not $env:CODEX_THREAD_ID -and -not $isPaseoTerminal) {
   Import-Module Terminal-Icons -ErrorAction SilentlyContinue
 }
 
-if (Get-Module -ListAvailable -Name Microsoft.WinGet.CommandNotFound) {
-  Import-Module -Name Microsoft.WinGet.CommandNotFound -ErrorAction SilentlyContinue
-}
+# Disabled 2026-09-30: Microsoft.WinGet.CommandNotFound blocks ~30s per shell start on offline servers (delays ssh exit).
+# if (Get-Module -ListAvailable -Name Microsoft.WinGet.CommandNotFound) {
+#   Import-Module -Name Microsoft.WinGet.CommandNotFound -ErrorAction SilentlyContinue
+# }
 
 if ($Host.UI.SupportsVirtualTerminal -and (Get-Module -Name PSReadLine)) {
   try {
