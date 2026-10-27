@@ -104,6 +104,12 @@ fastfetch polyfilled binary를 우선 사용하고, 맞는 binary가 없으면 �
 `~/.local/bin`에 설치합니다. 각 도구는 best-effort이며, 실패해도 전체 배포를
 중단하지 않습니다.
 
+`btop`은 예외입니다. 공식 release는 GPU를 지원하지 않는 static build이므로,
+NVIDIA(NVML, WSL 포함) 또는 AMD(ROCm SMI) 라이브러리가 있는 머신에서는 임시
+micromamba로 conda-forge의 동적 링크 빌드를 `~/.local/share/dotfiles/btop`에 설치하고
+`~/.local/bin`에 링크합니다. 기존의 GPU 미지원 `~/.local/bin/btop`은 교체됩니다.
+`INSTALL_BTOP_GPU=0`이면 항상 static 빌드, `1`이면 GPU 빌드를 강제합니다.
+
 | 도구 | 용도 | 도구 | 용도 |
 |------|------|------|------|
 | `rg` | 빠른 recursive grep | `procs` | 읽기 쉬운 `ps` |

@@ -105,6 +105,12 @@ zsh がなく build tools がある場合は、zsh を `~/.local` にビルド�
 `~/.local/bin` に入れます。各ツールは best-effort で、失敗しても全体の
 deploy は中断しません。
 
+`btop` は例外です。公式 release は GPU 非対応の static build なので、NVIDIA
+（NVML、WSL を含む）または AMD（ROCm SMI）のライブラリがあるマシンでは、一時的な
+micromamba で conda-forge の動的リンク版を `~/.local/share/dotfiles/btop` に入れ、
+`~/.local/bin` へリンクします。既存の GPU 非対応 `~/.local/bin/btop` は置き換えます。
+`INSTALL_BTOP_GPU=0` で常に static 版、`1` で GPU 版を強制します。
+
 | ツール | 用途 | ツール | 用途 |
 |--------|------|--------|------|
 | `rg` | 高速 recursive grep | `procs` | 読みやすい `ps` |

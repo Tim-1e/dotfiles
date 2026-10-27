@@ -100,6 +100,12 @@ apply 失败。
 `scripts/install/modern-cli.sh` 把常用现代命令行工具以预编译二进制形式安装到
 `~/.local/bin`。每个工具都是 best-effort，失败只打印 skip，不中断部署。
 
+`btop` 是例外：官方 release 是静态编译版，不带 GPU 支持。所以在检测到 NVIDIA
+（NVML，含 WSL）或 AMD（ROCm SMI）库的机器上，安装脚本会用临时下载的
+micromamba 安装 conda-forge 的动态链接版，放在 `~/.local/share/dotfiles/btop`，
+再链接到 `~/.local/bin`；已有的不带 GPU 的 `~/.local/bin/btop` 会被替换。设
+`INSTALL_BTOP_GPU=0` 始终用静态版，设 `1` 强制装 GPU 版。
+
 | 工具 | 用途 | 工具 | 用途 |
 |------|------|------|------|
 | `rg` | 快速递归 grep | `procs` | 更易读的 `ps` |

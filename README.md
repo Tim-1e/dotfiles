@@ -107,6 +107,14 @@ binary when available and otherwise skips without failing the entire apply.
 prebuilt binaries in `~/.local/bin`. Each install is best-effort: failures print
 a skip message and do not abort the full deploy.
 
+`btop` is the exception: the upstream release is a static build without GPU
+support, so on machines with an NVIDIA (NVML, including WSL) or AMD (ROCm SMI)
+library the installer uses the dynamically linked conda-forge build via a
+temporary micromamba, installed in `~/.local/share/dotfiles/btop` and linked
+into `~/.local/bin`. An existing non-GPU `~/.local/bin/btop` is replaced. Set
+`INSTALL_BTOP_GPU=0` to always use the static release, or `1` to force the GPU
+build.
+
 | Tool | Use | Tool | Use |
 |------|-----|------|-----|
 | `rg` | fast recursive grep | `procs` | readable `ps` |

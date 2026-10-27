@@ -20,6 +20,7 @@ _mcli_arch() {
       _MA_X="x86_64"                         # bare x86_64 (tealdeer/duf)
       _MA_LINUXX="x86_64-linux"              # procs zip
       _MA_GPING="x86_64"                     # gping
+      _MA_CONDA="linux-64"                   # micromamba / conda-forge
       ;;
     aarch64|arm64)
       _MA_MUSL="aarch64-unknown-linux-musl"
@@ -27,6 +28,7 @@ _mcli_arch() {
       _MA_X="aarch64"
       _MA_LINUXX="aarch64-linux"
       _MA_GPING="arm64"
+      _MA_CONDA="linux-aarch64"
       ;;
     *)
       return 1
@@ -170,6 +172,109 @@ _mcli_install_versioned() {
   _mcli_install "$cmd" "$url" "$type" "$rx"
 }
 
+# --- btop -------------------------------------------------------------------
+# The upstream btop release is a static musl build, and static builds cannot
+# dlopen the GPU libraries (NVML / ROCm SMI), so its GPU boxes never appear.
+# Building from source needs GCC 14 / Clang 19, which older distros and no-sudo
+# hosts lack. On machines that have a GPU library, install the dynamically
+# linked conda-forge build instead (it ships its own libstdc++), using a
+# throwaway micromamba. Everywhere else, keep the static release.
+#
+# INSTALL_BTOP_GPU=auto (default: only when a GPU library is found) | 1 | 0.
+
+# Install prefix for the GPU build; override with BTOP_GPU_PREFIX.
+_mcli_btop_prefix() {
+  printf '%s' "${BTOP_GPU_PREFIX:-$HOME/.local/share/dotfiles/btop}"
+}
+
+# True when the NVIDIA (NVML) or AMD (ROCm SMI) monitoring library is present.
+# WSL exposes NVML under /usr/lib/wsl/lib.
+_mcli_has_gpu_lib() {
+  local ldc libs
+  [ -e /usr/lib/wsl/lib/libnvidia-ml.so.1 ] && return 0
+  ldc="$(command -v ldconfig 2>/dev/null || true)"
+  if [ -z "$ldc" ] && [ -x /sbin/ldconfig ]; then
+    ldc=/sbin/ldconfig
+  fi
+  [ -n "$ldc" ] || return 1
+  # Capture first: `ldconfig -p | grep -q` trips SIGPIPE under pipefail.
+  libs="$("$ldc" -p 2>/dev/null || true)"
+  case "$libs" in
+    *libnvidia-ml.so.1*|*librocm_smi64.so*) return 0 ;;
+  esac
+  return 1
+}
+
+# True when the given btop binary was built with GPU support.
+_mcli_btop_has_gpu() {
+  local out
+  out="$("$1" --version 2>/dev/null || true)"
+  case "$out" in
+    *GPU_SUPPORT=true*) return 0 ;;
+  esac
+  return 1
+}
+
+# Install conda-forge btop into the GPU prefix and link it into ~/.local/bin.
+# Returns non-zero on failure (the caller falls back to the static release).
+_mcli_install_btop_conda() {
+  local work mm prefix
+  prefix="$(_mcli_btop_prefix)"
+  work="$(mktemp -d)" || return 1
+  mm="$(command -v micromamba 2>/dev/null || true)"
+  if [ -z "$mm" ]; then
+    mm="$work/micromamba"
+    if ! curl -fsSL "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-${_MA_CONDA}" -o "$mm"; then
+      rm -rf "$work"
+      echo "Skipping GPU btop; micromamba download failed."
+      return 1
+    fi
+    chmod +x "$mm"
+  fi
+
+  echo "Installing btop with GPU support (conda-forge) into $prefix..."
+  rm -rf "$prefix"
+  mkdir -p "$(dirname "$prefix")"
+  # Private root prefix + --no-rc: never touch the user's conda/mamba setup.
+  if ! MAMBA_ROOT_PREFIX="$work/root" "$mm" create -y -q --no-rc \
+      -p "$prefix" -c conda-forge --override-channels btop >/dev/null 2>&1 \
+    || ! _mcli_btop_has_gpu "$prefix/bin/btop"; then
+    rm -rf "$work" "$prefix"
+    echo "Skipping GPU btop; conda-forge install failed."
+    return 1
+  fi
+  rm -rf "$work"
+
+  mkdir -p "$HOME/.local/bin"
+  rm -f "$HOME/.local/bin/btop"
+  ln -s "$prefix/bin/btop" "$HOME/.local/bin/btop"
+}
+
+install_btop() {
+  local want_gpu=0 cur
+  case "${INSTALL_BTOP_GPU:-auto}" in
+    1|true|yes) want_gpu=1 ;;
+    0|false|no) want_gpu=0 ;;
+    *) _mcli_has_gpu_lib && want_gpu=1 ;;
+  esac
+
+  if [ "$want_gpu" = "1" ]; then
+    cur="$(command -v btop 2>/dev/null || true)"
+    if [ -n "$cur" ] && _mcli_btop_has_gpu "$cur"; then
+      return 0
+    fi
+    # Only replace a btop we own; leave system packages (e.g. /usr/bin) alone.
+    if [ -z "$cur" ] || [ "$cur" = "$HOME/.local/bin/btop" ]; then
+      _mcli_install_btop_conda && return 0
+    else
+      echo "Keeping $cur (no GPU support); remove it to let dotfiles install a GPU build."
+      return 0
+    fi
+  fi
+
+  _mcli_install btop "https://github.com/aristocratos/btop/releases/latest/download/btop-${_MA_MUSL}.tar.gz" tar '(^|/)btop$'
+}
+
 install_modern_cli() {
   if [ "${INSTALL_MODERN_CLI:-1}" = "0" ]; then
     return
@@ -205,7 +310,7 @@ install_modern_cli() {
 
   # --- tarball assets (no version in the filename) ---
   _mcli_install gping "https://github.com/orf/gping/releases/latest/download/gping-Linux-musl-${_MA_GPING}.tar.gz" tar '(^|/)gping$'
-  _mcli_install btop  "https://github.com/aristocratos/btop/releases/latest/download/btop-${_MA_MUSL}.tar.gz" tar '(^|/)btop$'
+  install_btop  # static release, or conda-forge GPU build when a GPU is present
 
   # --- versioned tarball assets (tag embedded in the filename) ---
   _mcli_install_versioned rg    BurntSushi/ripgrep "https://github.com/BurntSushi/ripgrep/releases/download/{tag}/ripgrep-{tag}-${_MA_MUSL}.tar.gz" tar '(^|/)rg$'
